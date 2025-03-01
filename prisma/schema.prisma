@@ -1,0 +1,328 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// --- ENUMÉRATIONS ---
+
+enum EtatEntite {
+  DISPONIBLE
+  EN_MAINTENANCE
+  HORS_SERVICE
+  A_VERIFIER
+  INDISPONIBLE
+}
+
+enum TypeEntretien {
+  ENTRETIEN_REGULIER
+  REPARATION
+  REVISION_MOTEUR
+  VIDANGE
+  FREINS
+  PNEUS
+  TRANSMISSION
+  AUTRES
+}
+
+enum Criticite {
+  FAIBLE
+  MOYENNE
+  ELEVEE
+  CRITIQUE
+}
+
+enum TypePiece {
+  MOTEUR
+  TRANSMISSION
+  FREINAGE
+  SUSPENSION
+  PNEU
+  CHASSIS
+  FLUIDE
+  ELECTRIQUE
+  AUTRES
+}
+
+enum TypeUtilisation {
+  SESSION_NORMALE
+  COURSE
+  FORMATION
+  TEST_TECHNIQUE
+}
+
+// --- MODÈLES PRINCIPAUX ---
+
+model PartieCycle {
+  id                String            @id @default(auto()) @map("_id") @db.ObjectId
+  numSerie          String            @unique
+  modele            String
+  dateAcquisition   DateTime
+  kilometrage       Float             @default(0)
+  etat              EtatEntite        @default(DISPONIBLE)
+  notesEtat         String?
+  couleur           String?
+  
+  // Relation avec le moteur actuellement monté (optionnel)
+  moteurCourantId   String?           @db.ObjectId @unique
+  moteurCourant     Moteur?           @relation(fields: [moteurCourantId], references: [id], name: "MoteurMonte")
+  
+  // Relations
+  historiquesMontage HistoriqueMontage[] @relation("CycleHistorique")
+  controles         ControleJournalier[]
+  maintenances      Maintenance[]      @relation("CycleMaintenance")
+  utilisations      Utilisation[]      @relation("CycleUtilisation")
+  
+  // Métadonnées
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@index([modele])
+  @@index([etat])
+}
+
+model Moteur {
+  id                String            @id @default(auto()) @map("_id") @db.ObjectId
+  numSerie          String            @unique
+  type              String
+  cylindree         Int               @default(125)
+  dateAcquisition   DateTime
+  kilometrage       Float             @default(0)
+  heuresMoteur      Float?            @default(0)
+  etat              EtatEntite        @default(DISPONIBLE)
+  notesEtat         String?
+  
+  // Relations
+  cycleActuel       PartieCycle?      @relation("MoteurMonte")
+  historiquesMontage HistoriqueMontage[] @relation("MoteurHistorique")
+  maintenances      Maintenance[]      @relation("MoteurMaintenance")
+  
+  // Métadonnées
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  // Index pour optimiser les requêtes
+  @@index([type])
+  @@index([etat])
+}
+
+model HistoriqueMontage {
+  id                String            @id @default(auto()) @map("_id") @db.ObjectId
+  dateDebut         DateTime
+  dateFin           DateTime?
+  
+  // Kilométrages au moment du montage/démontage
+  kilometrageDebutCycle Float
+  kilometrageDebutMoteur Float
+  kilometrageFinCycle  Float?
+  kilometrageFinMoteur Float?
+  
+  technicien        String
+  notes             String?
+
+  // Relations
+  cycleId           String            @db.ObjectId
+  cycle             PartieCycle       @relation("CycleHistorique", fields: [cycleId], references: [id])
+  
+  moteurId          String            @db.ObjectId
+  moteur            Moteur            @relation("MoteurHistorique", fields: [moteurId], references: [id])
+  
+  // Métadonnées
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  // Index pour optimiser les requêtes
+  @@index([cycleId])
+  @@index([moteurId])
+  @@index([dateDebut])
+}
+
+model Maintenance {
+  id                String            @id @default(auto()) @map("_id") @db.ObjectId
+  type              TypeEntretien
+  dateRealisation   DateTime
+  kilometrageEffectue Float
+  coutTotal         Float             @default(0)
+  technicien        String
+  description       String
+  notes             String?
+  
+  // Relations conditionnelles (peut s'appliquer à un cycle, à un moteur, ou aux deux)
+  cycleId           String?           @db.ObjectId
+  cycle             PartieCycle?      @relation("CycleMaintenance", fields: [cycleId], references: [id])
+  
+  moteurId          String?           @db.ObjectId
+  moteur            Moteur?           @relation("MoteurMaintenance", fields: [moteurId], references: [id])
+  
+  piecesUtilisees   PieceUtilisee[]
+  
+  // Métadonnées
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  // Index pour optimiser les requêtes
+  @@index([cycleId])
+  @@index([moteurId])
+  @@index([dateRealisation])
+  @@index([type])
+}
+
+model Piece {
+  id                String            @id @default(auto()) @map("_id") @db.ObjectId
+  reference         String            @unique
+  nom               String
+  description       String?
+  type              TypePiece
+  fournisseur       String?
+  prixUnitaire      Float
+  
+  // Gestion du stock
+  quantiteStock     Int               @default(0)
+  quantiteMinimale  Int               @default(1)
+  emplacement       String?
+  
+  // Relations
+  utilisations      PieceUtilisee[]
+  
+  // Métadonnées
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  // Index pour optimiser les requêtes
+  @@index([type])
+  @@index([quantiteStock])
+}
+
+model PieceUtilisee {
+  id                String            @id @default(auto()) @map("_id") @db.ObjectId
+  quantite          Int
+  prixUnitaire      Float             // Snapshot du prix au moment de l'utilisation
+  
+  // Relations
+  pieceId           String            @db.ObjectId
+  piece             Piece             @relation(fields: [pieceId], references: [id])
+  
+  maintenanceId     String            @db.ObjectId
+  maintenance       Maintenance       @relation(fields: [maintenanceId], references: [id])
+  
+  // Métadonnées
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  // Index pour optimiser les requêtes
+  @@index([pieceId])
+  @@index([maintenanceId])
+}
+
+model ControleJournalier {
+  id                String            @id @default(auto()) @map("_id") @db.ObjectId
+  date              DateTime
+  controleur        String
+  estConforme       Boolean
+  
+  // Éléments contrôlés
+  freinsAvant       Boolean           @default(true)
+  freinsArriere     Boolean           @default(true)
+  pneus             Boolean           @default(true)
+  suspensions       Boolean           @default(true)
+  transmission      Boolean           @default(true)
+  niveauxFluides    Boolean           @default(true)
+  eclairage         Boolean           @default(true)
+  autres            String?
+  
+  commentaires      String?
+  
+  // Relations
+  cycleId           String            @db.ObjectId
+  cycle             PartieCycle       @relation(fields: [cycleId], references: [id])
+  
+  // Métadonnées
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  // Index pour optimiser les requêtes
+  @@index([cycleId])
+  @@index([date])
+  @@index([estConforme])
+}
+
+model Utilisation {
+  id                String            @id @default(auto()) @map("_id") @db.ObjectId
+  date              DateTime
+  responsable       String
+  nbTours           Int
+  distanceTour      Float             @default(800) // Longueur du circuit en mètres
+  distanceTotale    Float             // Calculée: nbTours * distanceTour
+  type              TypeUtilisation   @default(SESSION_NORMALE)
+  notes             String?
+  
+  // Relations
+  cycleId           String            @db.ObjectId
+  cycle             PartieCycle       @relation("CycleUtilisation", fields: [cycleId], references: [id])
+  
+  // Métadonnées
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  // Index pour optimiser les requêtes
+  @@index([cycleId])
+  @@index([date])
+  @@index([type])
+}
+
+model PlanningMaintenance {
+  id                String            @id @default(auto()) @map("_id") @db.ObjectId
+  titre             String
+  description       String
+  type              TypeEntretien
+  dateEstimee       DateTime
+  
+  // Pour quel type d'entité
+  estMoteur         Boolean           // true pour moteur, false pour cycle
+  
+  entiteId          String            @db.ObjectId // ID du cycle ou du moteur
+  kilometragePrevu  Float
+  criticite         Criticite         @default(MOYENNE)
+  technicienAssigne String?
+  estComplete       Boolean           @default(false)
+  
+  // Métadonnées
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  // Index pour optimiser les requêtes
+  @@index([entiteId])
+  @@index([dateEstimee])
+  @@index([estComplete])
+  @@index([criticite])
+}
+
+model Alerte {
+  id                String            @id @default(auto()) @map("_id") @db.ObjectId
+  titre             String
+  message           String
+  type              String            // "MAINTENANCE", "STOCK", "INCIDENT", etc.
+  criticite         Criticite
+  dateCreation      DateTime          @default(now())
+  estTraitee        Boolean           @default(false)
+  traitePar         String?
+  dateTraitement    DateTime?
+  
+  // Références optionnelles vers d'autres entités
+  cycleId           String?           @db.ObjectId
+  moteurId          String?           @db.ObjectId
+  pieceId           String?           @db.ObjectId
+  
+  // Métadonnées
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  // Index pour optimiser les requêtes
+  @@index([estTraitee])
+  @@index([criticite])
+  @@index([dateCreation])
+  @@index([type])
+}
