@@ -1,3 +1,6 @@
+// Schéma Prisma optimisé pour MongoDB
+// Avec des index composites et adaptés aux requêtes fréquentes
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -54,6 +57,35 @@ enum TypeUtilisation {
   TEST_TECHNIQUE
 }
 
+enum NotificationChannel {
+  EMAIL
+  SMS
+  PUSH
+  WEBHOOK
+  IN_APP
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  CANCELLED
+}
+
+enum NotificationEventType {
+  MOTO_STATUS_CHANGE
+  MAINTENANCE_DUE
+  MAINTENANCE_OVERDUE
+  MAINTENANCE_COMPLETED
+  STOCK_LOW
+  STOCK_OUT
+  PLANNING_REMINDER
+  CONTROL_FAILED
+  NEW_ALERT
+  CRITICAL_ALERT
+  SYSTEM_STATUS
+}
+
 // --- MODÈLES PRINCIPAUX ---
 
 model PartieCycle {
@@ -80,8 +112,12 @@ model PartieCycle {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  @@index([modele])
-  @@index([etat])
+  // Index optimisés
+  @@index([modele, etat])
+  @@index([etat, kilometrage])
+  @@index([numSerie, modele])
+  @@index([createdAt])
+  @@index([updatedAt])
 }
 
 model Moteur {
@@ -104,9 +140,12 @@ model Moteur {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  // Index pour optimiser les requêtes
-  @@index([type])
-  @@index([etat])
+  // Index optimisés
+  @@index([type, etat])
+  @@index([etat, kilometrage])
+  @@index([numSerie, type])
+  @@index([createdAt])
+  @@index([updatedAt])
 }
 
 model HistoriqueMontage {
@@ -134,10 +173,11 @@ model HistoriqueMontage {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  // Index pour optimiser les requêtes
-  @@index([cycleId])
-  @@index([moteurId])
-  @@index([dateDebut])
+  // Index optimisés
+  @@index([cycleId, dateDebut])
+  @@index([moteurId, dateDebut])
+  @@index([dateDebut, dateFin])
+  @@index([technicien])
 }
 
 model Maintenance {
@@ -163,11 +203,12 @@ model Maintenance {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  // Index pour optimiser les requêtes
-  @@index([cycleId])
-  @@index([moteurId])
-  @@index([dateRealisation])
-  @@index([type])
+  // Index optimisés
+  @@index([cycleId, dateRealisation])
+  @@index([moteurId, dateRealisation])
+  @@index([dateRealisation, type])
+  @@index([technicien, dateRealisation])
+  @@index([type, dateRealisation])
 }
 
 model Piece {
@@ -191,9 +232,11 @@ model Piece {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  // Index pour optimiser les requêtes
+  // Index optimisés
   @@index([type])
-  @@index([quantiteStock])
+  @@index([quantiteStock, quantiteMinimale])
+  @@index([nom])
+  @@index([fournisseur])
 }
 
 model PieceUtilisee {
@@ -212,8 +255,8 @@ model PieceUtilisee {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  // Index pour optimiser les requêtes
-  @@index([pieceId])
+  // Index optimisés
+  @@index([pieceId, maintenanceId])
   @@index([maintenanceId])
 }
 
@@ -243,10 +286,10 @@ model ControleJournalier {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  // Index pour optimiser les requêtes
-  @@index([cycleId])
-  @@index([date])
-  @@index([estConforme])
+  // Index optimisés
+  @@index([cycleId, date])
+  @@index([date, estConforme])
+  @@index([controleur, date])
 }
 
 model Utilisation {
@@ -267,10 +310,10 @@ model Utilisation {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  // Index pour optimiser les requêtes
-  @@index([cycleId])
-  @@index([date])
-  @@index([type])
+  // Index optimisés
+  @@index([cycleId, date])
+  @@index([date, type])
+  @@index([responsable, date])
 }
 
 model PlanningMaintenance {
@@ -293,11 +336,11 @@ model PlanningMaintenance {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  // Index pour optimiser les requêtes
-  @@index([entiteId])
-  @@index([dateEstimee])
-  @@index([estComplete])
-  @@index([criticite])
+  // Index optimisés
+  @@index([entiteId, estMoteur])
+  @@index([dateEstimee, estComplete])
+  @@index([estComplete, criticite])
+  @@index([technicienAssigne, dateEstimee])
 }
 
 model Alerte {
@@ -320,9 +363,100 @@ model Alerte {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  // Index pour optimiser les requêtes
-  @@index([estTraitee])
-  @@index([criticite])
-  @@index([dateCreation])
-  @@index([type])
+  // Index optimisés
+  @@index([estTraitee, criticite])
+  @@index([dateCreation, estTraitee])
+  @@index([type, estTraitee])
+  @@index([cycleId])
+  @@index([moteurId])
+  @@index([pieceId])
+}
+
+// --- NOUVEAUX MODÈLES ---
+
+model Journal {
+  id                String            @id @default(auto()) @map("_id") @db.ObjectId
+  timestamp         DateTime          @default(now())
+  eventType         String            // Type d'événement (correspond à LogEventType)
+  severity          String            // LogSeverity (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+  userId            String?
+  userName          String?
+  message           String
+  details           Json?             // Détails de l'événement
+  entityType        String?           // Type d'entité concernée (moto, moteur, etc.)
+  entityId          String?           // ID de l'entité concernée
+  metadata          Json?             // Métadonnées supplémentaires
+  
+  // Métadonnées
+  createdAt         DateTime          @default(now())
+
+  // Index optimisés
+  @@index([timestamp, severity])
+  @@index([eventType, timestamp])
+  @@index([entityType, entityId])
+  @@index([userId, timestamp])
+}
+
+model Notification {
+  id                String                @id @default(auto()) @map("_id") @db.ObjectId
+  eventType         NotificationEventType
+  title             String
+  message           String
+  channel           NotificationChannel
+  recipientId       String?
+  recipientEmail    String?
+  recipientPhone    String?
+  status            NotificationStatus    @default(PENDING)
+  sentAt            DateTime?
+  payload           Json?
+  metadata          Json?
+  
+  // Métadonnées
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  // Index optimisés
+  @@index([recipientId, status])
+  @@index([eventType, status])
+  @@index([channel, status])
+  @@index([createdAt, status])
+}
+
+model Webhook {
+  id                String                @id @default(auto()) @map("_id") @db.ObjectId
+  name              String
+  url               String
+  eventTypes        NotificationEventType[]
+  isActive          Boolean               @default(true)
+  secret            String?
+  headers           Json?                 // En-têtes HTTP personnalisés
+  lastCalledAt      DateTime?
+  failureCount      Int                   @default(0)
+  
+  // Métadonnées
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  // Index optimisés
+  @@index([isActive])
+  @@index([failureCount, isActive])
+}
+
+model InAppNotification {
+  id                String                @id @default(auto()) @map("_id") @db.ObjectId
+  userId            String
+  title             String
+  message           String
+  isRead            Boolean               @default(false)
+  eventType         NotificationEventType
+  payload           Json?
+  
+  // Métadonnées
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  // Index optimisés
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+  @@index([eventType, isRead])
 }

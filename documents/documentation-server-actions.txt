@@ -1,0 +1,1878 @@
+# Documentation technique des Server Actions
+
+## Table des matières
+
+1. [Introduction](#introduction)
+2. [Structure générale des Server Actions](#structure-générale-des-server-actions)
+3. [Gestion des parties cycles (motos)](#gestion-des-parties-cycles-motos)
+4. [Gestion des moteurs](#gestion-des-moteurs)
+5. [Gestion des maintenances](#gestion-des-maintenances)
+6. [Gestion des contrôles journaliers](#gestion-des-contrôles-journaliers)
+7. [Gestion des utilisations (sessions)](#gestion-des-utilisations-sessions)
+8. [Gestion des pièces et du stock](#gestion-des-pièces-et-du-stock)
+9. [Gestion des alertes](#gestion-des-alertes)
+10. [Planification des maintenances](#planification-des-maintenances)
+11. [Statistiques et tableaux de bord](#statistiques-et-tableaux-de-bord)
+12. [Gestion des erreurs](#gestion-des-erreurs)
+13. [Bonnes pratiques d'utilisation](#bonnes-pratiques-dutilisation)
+14. [Exemples d'intégration dans l'UI](#exemples-dintégration-dans-lui)
+
+## Introduction
+
+Les Server Actions sont des fonctions exécutées côté serveur qui permettent d'interagir avec la base de données MongoDB via Prisma. Elles sont utilisées pour toutes les opérations CRUD (Create, Read, Update, Delete) et la logique métier du système.
+
+Ces actions suivent une structure standard pour la validation des données, la gestion des erreurs et le retour des résultats, ce qui facilite leur intégration dans l'interface utilisateur.
+
+## Structure générale des Server Actions
+
+Chaque Server Action suit généralement cette structure :
+
+```typescript
+'use server'
+
+import { revalidatePath } from 'next/cache';
+import { prisma } from '@/lib/db';
+import { someValidationSchema } from '@/lib/validations';
+import { z } from 'zod';
+
+export async function someAction(
+  data: z.infer<typeof someValidationSchema>
+) {
+  try {
+    // 1. Validation des données avec Zod
+    const validatedData = someValidationSchema.parse(data);
+    
+    // 2. Traitement des données (peut inclure des transactions)
+    const result = await prisma.someModel.create({
+      data: validatedData
+    });
+    
+    // 3. Revalidation des chemins pour Next.js
+    revalidatePath('/some/path');
+    
+    // 4. Retour standardisé
+    return { success: true, data: result };
+  } catch (error) {
+    // 5. Gestion des erreurs
+    console.error('Error in someAction:', error);
+    
+    if (error instanceof z.ZodError) {
+      return { 
+        success: false, 
+        error: 'Invalid data', 
+        validationErrors: error.errors 
+      };
+    }
+    
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    };
+  }
+}
+```
+
+**Retour standard** : Toutes les Server Actions retournent un objet avec les propriétés suivantes :
+- `success` : boolean indiquant si l'action a réussi
+- `data` : (optionnel) données résultantes de l'action
+- `error` : (optionnel) message d'erreur en cas d'échec
+- `validationErrors` : (optionnel) erreurs de validation Zod
+
+## Gestion des parties cycles (motos)
+
+### `getMotos`
+
+Récupère la liste des motos avec pagination et filtres.
+
+```typescript
+getMotos({
+  page?: number;
+  limit?: number;
+  etat?: EtatEntite;
+  modele?: string;
+  search?: string;
+}): Promise<{
+  data: PartieCycle[];
+  pagination: {
+    total: number;
+    pageCount: number;
+    currentPage: number;
+    perPage: number;
+  };
+}>
+```
+
+**Paramètres** :
+- `page` : Numéro de page (défaut: 1)
+- `limit` : Nombre d'éléments par page (défaut: 10)
+- `etat` : Filtre par état (DISPONIBLE, EN_MAINTENANCE, etc.)
+- `modele` : Filtre par modèle
+- `search` : Recherche textuelle dans le numéro de série et les notes
+
+**Exemple d'utilisation** :
+```typescript
+import { getMotos } from '@/app/actions/motos';
+
+// Dans un composant Server
+const motos = await getMotos({ page: 1, limit: 10, etat: 'DISPONIBLE' });
+
+// Dans un composant Client avec React
+'use client'
+import { useState, useEffect } from 'react';
+import { getMotos } from '@/app/actions/motos';
+
+export default function MotosList() {
+  const [motos, setMotos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  
+  useEffect(() => {
+    async function fetchMotos() {
+      try {
+        const result = await getMotos({ page: 1 });
+        setMotos(result.data);
+      } catch (error) {
+        console.error('Failed to fetch motos:', error);
+      } finally {
+        setLoading(false);
+      }
+    }
+    
+    fetchMotos();
+  }, []);
+  
+  if (loading) return <div>Chargement...</div>;
+  
+  return (
+    <div>
+      {motos.map(moto => (
+        <div key={moto.id}>{moto.numSerie} - {moto.modele}</div>
+      ))}
+    </div>
+  );
+}
+```
+
+### `getMotoById`
+
+Récupère les détails d'une moto spécifique avec ses relations.
+
+```typescript
+getMotoById(id: string): Promise<PartieCycle & {
+  moteurCourant?: Moteur;
+  controles: ControleJournalier[];
+  maintenances: Maintenance[];
+  utilisations: Utilisation[];
+  historiquesMontage: HistoriqueMontage[];
+}>
+```
+
+**Paramètres** :
+- `id` : ID de la moto à récupérer
+
+**Exemple d'utilisation** :
+```typescript
+import { getMotoById } from '@/app/actions/motos';
+
+// Dans un composant Server
+const moto = await getMotoById('123');
+```
+
+### `createMoto`
+
+Crée une nouvelle moto.
+
+```typescript
+createMoto(data: {
+  numSerie: string;
+  modele: string;
+  dateAcquisition?: Date;
+  etat?: EtatEntite;
+  notesEtat?: string;
+  couleur?: string;
+  moteurCourantId?: string;
+}): Promise<{
+  success: boolean;
+  data?: PartieCycle;
+  error?: string;
+  validationErrors?: z.ZodError['errors'];
+}>
+```
+
+**Paramètres** :
+- `data` : Données de la moto à créer
+
+**Exemple d'utilisation** :
+```typescript
+'use client'
+import { useState } from 'react';
+import { createMoto } from '@/app/actions/motos';
+
+export default function CreateMotoForm() {
+  const [numSerie, setNumSerie] = useState('');
+  const [modele, setModele] = useState('');
+  const [error, setError] = useState('');
+  
+  async function handleSubmit(e) {
+    e.preventDefault();
+    
+    const result = await createMoto({
+      numSerie,
+      modele,
+      dateAcquisition: new Date()
+    });
+    
+    if (result.success) {
+      // Réinitialiser le formulaire ou rediriger
+      setNumSerie('');
+      setModele('');
+    } else {
+      setError(result.error || 'Une erreur est survenue');
+    }
+  }
+  
+  return (
+    <form onSubmit={handleSubmit}>
+      {error && <div className="error">{error}</div>}
+      <input
+        value={numSerie}
+        onChange={e => setNumSerie(e.target.value)}
+        placeholder="Numéro de série"
+        required
+      />
+      <input
+        value={modele}
+        onChange={e => setModele(e.target.value)}
+        placeholder="Modèle"
+        required
+      />
+      <button type="submit">Créer</button>
+    </form>
+  );
+}
+```
+
+### `updateMoto`
+
+Met à jour une moto existante.
+
+```typescript
+updateMoto(
+  id: string,
+  data: {
+    numSerie?: string;
+    modele?: string;
+    dateAcquisition?: Date;
+    etat?: EtatEntite;
+    notesEtat?: string;
+    couleur?: string;
+    moteurCourantId?: string;
+  }
+): Promise<{
+  success: boolean;
+  data?: PartieCycle;
+  error?: string;
+  validationErrors?: z.ZodError['errors'];
+}>
+```
+
+**Paramètres** :
+- `id` : ID de la moto à mettre à jour
+- `data` : Données à mettre à jour
+
+### `deleteMoto`
+
+Supprime une moto existante.
+
+```typescript
+deleteMoto(id: string): Promise<{
+  success: boolean;
+  error?: string;
+}>
+```
+
+**Paramètres** :
+- `id` : ID de la moto à supprimer
+
+### `updateMotoKilometrage`
+
+Met à jour le kilométrage d'une moto.
+
+```typescript
+updateMotoKilometrage(
+  id: string,
+  nouveauKilometrage: number
+): Promise<{
+  success: boolean;
+  data?: PartieCycle;
+  error?: string;
+}>
+```
+
+**Paramètres** :
+- `id` : ID de la moto
+- `nouveauKilometrage` : Nouveau kilométrage (doit être supérieur à l'ancien)
+
+### `changeEtatMoto`
+
+Change l'état d'une moto.
+
+```typescript
+changeEtatMoto(
+  id: string,
+  nouvelEtat: EtatEntite,
+  notes?: string
+): Promise<{
+  success: boolean;
+  data?: PartieCycle;
+  error?: string;
+}>
+```
+
+**Paramètres** :
+- `id` : ID de la moto
+- `nouvelEtat` : Nouvel état (DISPONIBLE, EN_MAINTENANCE, etc.)
+- `notes` : Notes optionnelles expliquant le changement d'état
+
+## Gestion des moteurs
+
+### `getMoteurs`
+
+Récupère la liste des moteurs avec pagination et filtres.
+
+```typescript
+getMoteurs({
+  page?: number;
+  limit?: number;
+  etat?: EtatEntite;
+  type?: string;
+  estMonte?: boolean;
+  search?: string;
+}): Promise<{
+  data: Moteur[];
+  pagination: {
+    total: number;
+    pageCount: number;
+    currentPage: number;
+    perPage: number;
+  };
+}>
+```
+
+**Paramètres** :
+- `page` : Numéro de page (défaut: 1)
+- `limit` : Nombre d'éléments par page (défaut: 10)
+- `etat` : Filtre par état
+- `type` : Filtre par type de moteur
+- `estMonte` : Filtre les moteurs montés (true) ou non montés (false)
+- `search` : Recherche textuelle
+
+### `getMoteurById`
+
+Récupère les détails d'un moteur spécifique avec ses relations.
+
+```typescript
+getMoteurById(id: string): Promise<Moteur & {
+  cycleActuel?: PartieCycle;
+  maintenances: Maintenance[];
+  historiquesMontage: HistoriqueMontage[];
+}>
+```
+
+**Paramètres** :
+- `id` : ID du moteur à récupérer
+
+### `createMoteur`, `updateMoteur`, `changeEtatMoteur`
+
+Ces actions suivent la même structure que leurs équivalents pour les motos.
+
+### `monterMoteur`
+
+Monte un moteur sur une partie cycle.
+
+```typescript
+monterMoteur({
+  moteurId: string;
+  cycleId: string;
+  technicien: string;
+  date?: Date;
+  notes?: string;
+}): Promise<{
+  success: boolean;
+  data?: any;
+  error?: string;
+}>
+```
+
+**Paramètres** :
+- `moteurId` : ID du moteur à monter
+- `cycleId` : ID de la partie cycle sur laquelle monter le moteur
+- `technicien` : Nom du technicien effectuant l'opération
+- `date` : Date de l'opération (défaut: date actuelle)
+- `notes` : Notes optionnelles
+
+### `demonterMoteur`
+
+Démonte un moteur d'une partie cycle.
+
+```typescript
+demonterMoteur({
+  cycleId: string;
+  technicien: string;
+  date?: Date;
+  notes?: string;
+}): Promise<{
+  success: boolean;
+  data?: any;
+  error?: string;
+}>
+```
+
+**Paramètres** :
+- `cycleId` : ID de la partie cycle dont il faut démonter le moteur
+- `technicien` : Nom du technicien effectuant l'opération
+- `date` : Date de l'opération (défaut: date actuelle)
+- `notes` : Notes optionnelles
+
+## Gestion des maintenances
+
+### `getMaintenances`
+
+Récupère la liste des maintenances avec pagination et filtres.
+
+```typescript
+getMaintenances({
+  page?: number;
+  limit?: number;
+  type?: TypeEntretien;
+  cycleId?: string;
+  moteurId?: string;
+  dateDebut?: Date;
+  dateFin?: Date;
+}): Promise<{
+  data: Maintenance[];
+  pagination: {
+    total: number;
+    pageCount: number;
+    currentPage: number;
+    perPage: number;
+  };
+}>
+```
+
+**Paramètres** :
+- Filtres standards de pagination
+- `type` : Type d'entretien
+- `cycleId` : Filtre par partie cycle
+- `moteurId` : Filtre par moteur
+- `dateDebut`, `dateFin` : Plage de dates
+
+### `getMaintenanceById`
+
+Récupère les détails d'une maintenance spécifique.
+
+```typescript
+getMaintenanceById(id: string): Promise<Maintenance & {
+  cycle?: PartieCycle;
+  moteur?: Moteur;
+  piecesUtilisees: (PieceUtilisee & {
+    piece: Piece;
+  })[];
+}>
+```
+
+**Paramètres** :
+- `id` : ID de la maintenance à récupérer
+
+### `createMaintenance`
+
+Crée une nouvelle maintenance, met à jour les entités concernées et gère les pièces utilisées.
+
+```typescript
+createMaintenance(data: {
+  type: TypeEntretien;
+  dateRealisation: Date;
+  kilometrageEffectue: number;
+  coutTotal: number;
+  technicien: string;
+  description: string;
+  notes?: string;
+  cycleId?: string;
+  moteurId?: string;
+  piecesUtilisees?: {
+    pieceId: string;
+    quantite: number;
+    prixUnitaire?: number;
+  }[];
+}): Promise<{
+  success: boolean;
+  data?: Maintenance;
+  coutPieces?: number;
+  error?: string;
+  validationErrors?: z.ZodError['errors'];
+}>
+```
+
+**Paramètres** :
+- Données de la maintenance
+- `piecesUtilisees` : Liste des pièces utilisées avec quantités
+
+### `finaliserMaintenance`
+
+Finalise une maintenance en cours.
+
+```typescript
+finaliserMaintenance(
+  id: string,
+  notes?: string
+): Promise<{
+  success: boolean;
+  error?: string;
+}>
+```
+
+**Paramètres** :
+- `id` : ID de la maintenance à finaliser
+- `notes` : Notes additionnelles de finalisation
+
+## Gestion des contrôles journaliers
+
+### `getControles`
+
+Récupère la liste des contrôles journaliers avec pagination et filtres.
+
+```typescript
+getControles({
+  page?: number;
+  limit?: number;
+  cycleId?: string;
+  dateDebut?: Date;
+  dateFin?: Date;
+  estConforme?: boolean;
+}): Promise<{
+  data: ControleJournalier[];
+  pagination: {
+    total: number;
+    pageCount: number;
+    currentPage: number;
+    perPage: number;
+  };
+}>
+```
+
+**Paramètres** :
+- Filtres standards de pagination
+- `cycleId` : Filtre par partie cycle
+- `dateDebut`, `dateFin` : Plage de dates
+- `estConforme` : Filtre les contrôles conformes ou non
+
+### `createControle`
+
+Crée un nouveau contrôle journalier.
+
+```typescript
+createControle(data: {
+  date: Date;
+  controleur: string;
+  estConforme: boolean;
+  freinsAvant: boolean;
+  freinsArriere: boolean;
+  pneus: boolean;
+  suspensions: boolean;
+  transmission: boolean;
+  niveauxFluides: boolean;
+  eclairage: boolean;
+  autres?: string;
+  commentaires?: string;
+  cycleId: string;
+}): Promise<{
+  success: boolean;
+  data?: ControleJournalier;
+  error?: string;
+  validationErrors?: z.ZodError['errors'];
+}>
+```
+
+**Paramètres** :
+- Données du contrôle journalier
+
+### `getDernierControle`
+
+Récupère le dernier contrôle journalier d'une moto.
+
+```typescript
+getDernierControle(cycleId: string): Promise<ControleJournalier & {
+  cycle: PartieCycle;
+} | null>
+```
+
+**Paramètres** :
+- `cycleId` : ID de la partie cycle
+
+### `verifierBesoinControle`
+
+Vérifie si une moto a besoin d'un contrôle journalier.
+
+```typescript
+verifierBesoinControle(cycleId: string): Promise<{
+  besoinControle: boolean;
+  dernierControle: ControleJournalier | null;
+}>
+```
+
+**Paramètres** :
+- `cycleId` : ID de la partie cycle
+
+## Gestion des utilisations (sessions)
+
+### `getUtilisations`
+
+Récupère la liste des utilisations avec pagination et filtres.
+
+```typescript
+getUtilisations({
+  page?: number;
+  limit?: number;
+  cycleId?: string;
+  dateDebut?: Date;
+  dateFin?: Date;
+}): Promise<{
+  data: Utilisation[];
+  pagination: {
+    total: number;
+    pageCount: number;
+    currentPage: number;
+    perPage: number;
+  };
+}>
+```
+
+**Paramètres** :
+- Filtres standards de pagination
+- `cycleId` : Filtre par partie cycle
+- `dateDebut`, `dateFin` : Plage de dates
+
+### `createUtilisation`
+
+Crée une nouvelle utilisation (session) et met à jour les kilométrages.
+
+```typescript
+createUtilisation(data: {
+  date: Date;
+  responsable: string;
+  nbTours: number;
+  distanceTour?: number;
+  type?: TypeUtilisation;
+  notes?: string;
+  cycleId: string;
+}): Promise<{
+  success: boolean;
+  data?: Utilisation;
+  nouveauKilometrage?: number;
+  error?: string;
+  validationErrors?: z.ZodError['errors'];
+}>
+```
+
+**Paramètres** :
+- Données de l'utilisation
+- `distanceTour` : Distance d'un tour en mètres (défaut: 800)
+
+**Exemple d'utilisation** :
+```typescript
+'use client'
+import { useState } from 'react';
+import { createUtilisation } from '@/app/actions/utilisations';
+import { toast } from '@/components/ui/use-toast';
+
+export default function EnregistrerSession({ motoId }) {
+  const [nbTours, setNbTours] = useState(0);
+  const [responsable, setResponsable] = useState('');
+  
+  async function handleSubmit(e) {
+    e.preventDefault();
+    
+    const result = await createUtilisation({
+      date: new Date(),
+      responsable,
+      nbTours: parseInt(nbTours),
+      cycleId: motoId
+    });
+    
+    if (result.success) {
+      toast({
+        title: "Session enregistrée",
+        description: `${nbTours} tours enregistrés. Nouveau kilométrage: ${result.nouveauKilometrage} km`
+      });
+      setNbTours(0);
+    } else {
+      toast({
+        title: "Erreur",
+        description: result.error,
+        variant: "destructive"
+      });
+    }
+  }
+  
+  return (
+    <form onSubmit={handleSubmit}>
+      <input
+        type="number"
+        value={nbTours}
+        onChange={e => setNbTours(e.target.value)}
+        placeholder="Nombre de tours"
+        min="1"
+        required
+      />
+      <input
+        type="text"
+        value={responsable}
+        onChange={e => setResponsable(e.target.value)}
+        placeholder="Responsable"
+        required
+      />
+      <button type="submit">Enregistrer la session</button>
+    </form>
+  );
+}
+```
+
+### `getUtilisationStats`
+
+Récupère les statistiques d'utilisation par moto.
+
+```typescript
+getUtilisationStats(
+  dateDebut?: Date,
+  dateFin?: Date
+): Promise<Array<{
+  cycle: {
+    id: string;
+    numSerie: string;
+    modele: string;
+  };
+  totalDistance: number;
+  totalTours: number;
+  sessionCount: number;
+  utilisations: Utilisation[];
+}>>
+```
+
+**Paramètres** :
+- `dateDebut`, `dateFin` : Plage de dates optionnelle
+
+## Gestion des pièces et du stock
+
+### `getPieces`
+
+Récupère la liste des pièces avec pagination et filtres.
+
+```typescript
+getPieces({
+  page?: number;
+  limit?: number;
+  type?: TypePiece;
+  stockBas?: boolean;
+  search?: string;
+}): Promise<{
+  data: Piece[];
+  pagination: {
+    total: number;
+    pageCount: number;
+    currentPage: number;
+    perPage: number;
+  };
+}>
+```
+
+**Paramètres** :
+- Filtres standards de pagination
+- `type` : Type de pièce
+- `stockBas` : Si true, ne retourne que les pièces avec un stock bas
+- `search` : Recherche textuelle
+
+### `createPiece`, `updatePiece`, `deletePiece`
+
+Ces actions suivent la structure standard pour la gestion des pièces.
+
+### `ajusterStock`
+
+Ajuste le stock d'une pièce (entrée ou sortie).
+
+```typescript
+ajusterStock(
+  id: string,
+  quantite: number,
+  notes?: string
+): Promise<{
+  success: boolean;
+  data?: Piece;
+  error?: string;
+}>
+```
+
+**Paramètres** :
+- `id` : ID de la pièce
+- `quantite` : Quantité à ajouter (positive) ou à retirer (négative)
+- `notes` : Notes optionnelles expliquant l'ajustement
+
+## Gestion des alertes
+
+### `getAlertes`
+
+Récupère la liste des alertes avec pagination et filtres.
+
+```typescript
+getAlertes({
+  page?: number;
+  limit?: number;
+  type?: string;
+  criticite?: Criticite;
+  estTraitee?: boolean;
+  search?: string;
+}): Promise<{
+  data: Alerte[];
+  pagination: {
+    total: number;
+    pageCount: number;
+    currentPage: number;
+    perPage: number;
+  };
+}>
+```
+
+**Paramètres** :
+- Filtres standards de pagination
+- `type` : Type d'alerte
+- `criticite` : Niveau de criticité
+- `estTraitee` : Si true, ne retourne que les alertes traitées
+- `search` : Recherche textuelle
+
+### `createAlerte`
+
+Crée une nouvelle alerte.
+
+```typescript
+createAlerte(data: {
+  titre: string;
+  message: string;
+  type: string;
+  criticite: Criticite;
+  cycleId?: string;
+  moteurId?: string;
+  pieceId?: string;
+}): Promise<{
+  success: boolean;
+  data?: Alerte;
+  error?: string;
+  validationErrors?: z.ZodError['errors'];
+}>
+```
+
+**Paramètres** :
+- Données de l'alerte
+
+### `traiterAlerte`
+
+Marque une alerte comme traitée.
+
+```typescript
+traiterAlerte(
+  id: string,
+  utilisateur: string
+): Promise<{
+  success: boolean;
+  data?: Alerte;
+  error?: string;
+}>
+```
+
+**Paramètres** :
+- `id` : ID de l'alerte
+- `utilisateur` : Nom de l'utilisateur qui traite l'alerte
+
+### `genererAlertesEntretien`
+
+Génère automatiquement des alertes d'entretien en fonction des kilométrages.
+
+```typescript
+genererAlertesEntretien(): Promise<{
+  success: boolean;
+  alertesGenerees?: Alerte[];
+  stats?: {
+    cycles: number;
+    moteurs: number;
+    stock: number;
+    total: number;
+  };
+  error?: string;
+}>
+```
+
+## Planification des maintenances
+
+### `getPlanningMaintenances`
+
+Récupère la liste des plannings de maintenance avec pagination et filtres.
+
+```typescript
+getPlanningMaintenances({
+  page?: number;
+  limit?: number;
+  type?: TypeEntretien;
+  estComplete?: boolean;
+  dateMin?: Date;
+  dateMax?: Date;
+  criticite?: Criticite;
+}): Promise<{
+  data: PlanningMaintenance[];
+  pagination: {
+    total: number;
+    pageCount: number;
+    currentPage: number;
+    perPage: number;
+  };
+}>
+```
+
+**Paramètres** :
+- Filtres standards de pagination
+- `type` : Type d'entretien
+- `estComplete` : Si true, ne retourne que les plannings complétés
+- `dateMin`, `dateMax` : Plage de dates
+- `criticite` : Niveau de criticité
+
+### `createPlanningMaintenance`
+
+Crée un nouveau planning de maintenance.
+
+```typescript
+createPlanningMaintenance(data: {
+  titre: string;
+  description: string;
+  type: TypeEntretien;
+  dateEstimee: Date;
+  estMoteur: boolean;
+  entiteId: string;
+  kilometragePrevu: number;
+  criticite?: Criticite;
+  technicienAssigne?: string;
+}): Promise<{
+  success: boolean;
+  data?: PlanningMaintenance;
+  error?: string;
+  validationErrors?: z.ZodError['errors'];
+}>
+```
+
+**Paramètres** :
+- Données du planning
+- `estMoteur` : Indique si l'entité est un moteur (true) ou une partie cycle (false)
+
+### `completerPlanningMaintenance`
+
+Marque un planning de maintenance comme complété.
+
+```typescript
+completerPlanningMaintenance(
+  id: string,
+  maintenanceId?: string
+): Promise<{
+  success: boolean;
+  data?: PlanningMaintenance;
+  error?: string;
+}>
+```
+
+**Paramètres** :
+- `id` : ID du planning
+- `maintenanceId` : ID optionnel de la maintenance associée
+
+### `genererPlanningAutomatique`
+
+Génère automatiquement des plannings de maintenance en fonction des kilométrages.
+
+```typescript
+genererPlanningAutomatique(): Promise<{
+  success: boolean;
+  planningsGeneres?: PlanningMaintenance[];
+  stats?: {
+    cycles: number;
+    moteurs: number;
+    total: number;
+  };
+  error?: string;
+}>
+```
+
+## Statistiques et tableaux de bord
+
+### `getDashboardStats`
+
+Récupère les statistiques pour le tableau de bord.
+
+```typescript
+getDashboardStats(): Promise<{
+  cycles: { total: number; disponibles: number; enMaintenance: number; /* etc. */ };
+  moteurs: { total: number; disponibles: number; montes: number; /* etc. */ };
+  maintenances: { recentes: Maintenance[]; coutTotal: number };
+  alertes: { piecesStockBas: Piece[] };
+  activite: { controles: ControleJournalier[]; montages: HistoriqueMontage[] };
+  utilisation: { hebdomadaire: any[] };
+}>
+```
+
+### `getMaintenanceStats`
+
+Récupère les statistiques détaillées de maintenance.
+
+```typescript
+getMaintenanceStats(
+  dateDebut?: Date,
+  dateFin?: Date
+): Promise<{
+  total: { count: number; cout: number };
+  coutParType: Record<TypeEntretien, number>;
+  coutParModele: Record<string, number>;
+  piecesLesPlusUtilisees: any[];
+  maintenances: Maintenance[];
+}>
+```
+
+**Paramètres** :
+- `dateDebut`, `dateFin` : Plage de dates optionnelle
+
+### `getDashboardData`
+
+Récupère toutes les données nécessaires pour le tableau de bord principal.
+
+```typescript
+getDashboardData(): Promise<{
+  [key: string]: any; // Données complètes du dashboard
+}>
+```
+
+## Gestion des erreurs
+
+Toutes les Server Actions gèrent les erreurs de manière cohérente :
+
+1. Les erreurs de validation Zod sont capturées et retournées avec des détails
+2. Les erreurs de base de données sont loguées et retournées avec un message approprié
+3. Une structure de retour standard est utilisée pour faciliter la gestion côté client
+
+## Bonnes pratiques d'utilisation
+
+1. **Validation côté client** : Même si les Server Actions valident les données, il est recommandé de valider aussi côté client pour une meilleure expérience utilisateur.
+
+2. **Gestion des états de chargement** : Utilisez un état local pour indiquer quand une action est en cours.
+
+3. **Toast notifications** : Utilisez des toast pour indiquer le succès ou l'échec des actions.
+
+4.   **Revalidation** : Les Server Actions revalident automatiquement les chemins concernés, mais vous pouvez aussi forcer une revalidation avec `router.refresh()` (Next.js App Router).
+
+5. **Transactions** : Utilisez toujours les Server Actions qui font partie d'une transaction lorsque vous devez modifier plusieurs entités en même temps.
+
+6. **Mise en cache** : Certaines Server Actions, notamment celles de requête, peuvent bénéficier d'une mise en cache côté client pour de meilleures performances.
+
+## Exemples d'intégration dans l'UI
+
+### Exemple 1: Formulaire de création de moto
+
+```tsx
+'use client'
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
+import { createMoto } from '@/app/actions/motos';
+import { toast } from '@/components/ui/use-toast';
+
+// Schéma de validation basé sur celui défini dans validations.ts
+const formSchema = z.object({
+  numSerie: z.string().min(1, "Le numéro de série est requis"),
+  modele: z.string().min(1, "Le modèle est requis"),
+});
+
+export default function CreateMotoForm() {
+  const router = useRouter();
+  const [loading, setLoading] = useState(false);
+  
+  const form = useForm<z.infer<typeof formSchema>>({
+    resolver: zodResolver(formSchema),
+    defaultValues: {
+      numSerie: '',
+      modele: '',
+    },
+  });
+  
+  async function onSubmit(values: z.infer<typeof formSchema>) {
+    setLoading(true);
+    
+    try {
+      const result = await createMoto({
+        ...values,
+        dateAcquisition: new Date()
+      });
+      
+      if (result.success) {
+        toast({
+          title: "Moto créée",
+          description: `La moto ${values.numSerie} a été créée avec succès.`
+        });
+        
+        form.reset();
+        router.push(`/dashboard/motos/${result.data.id}`);
+      } else {
+        toast({
+          title: "Erreur",
+          description: result.error || "Une erreur est survenue lors de la création de la moto",
+          variant: "destructive"
+        });
+      }
+    } catch (error) {
+      console.error('Error:', error);
+      toast({
+        title: "Erreur",
+        description: "Une erreur inattendue est survenue",
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
+    }
+  }
+  
+  return (
+    <Form {...form}>
+      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+        <FormField
+          control={form.control}
+          name="numSerie"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Numéro de série</FormLabel>
+              <FormControl>
+                <Input {...field} disabled={loading} />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+        
+        <FormField
+          control={form.control}
+          name="modele"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Modèle</FormLabel>
+              <FormControl>
+                <Input {...field} disabled={loading} />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+        
+        <Button type="submit" disabled={loading}>
+          {loading ? 'Création...' : 'Créer la moto'}
+        </Button>
+      </form>
+    </Form>
+  );
+}
+```
+
+### Exemple 2: Tableau des motos avec pagination et filtres
+
+```tsx
+'use client'
+
+import { useState, useEffect } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { getMotos } from '@/app/actions/motos';
+import { EtatEntite } from '@prisma/client';
+
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
+import { Pagination } from '@/components/ui/pagination';
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+
+export default function MotosTable() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  
+  const [motos, setMotos] = useState([]);
+  const [pagination, setPagination] = useState({ 
+    total: 0, pageCount: 0, currentPage: 1, perPage: 10 
+  });
+  const [loading, setLoading] = useState(true);
+  const [filters, setFilters] = useState({
+    page: parseInt(searchParams.get('page') || '1'),
+    etat: searchParams.get('etat') || '',
+    modele: searchParams.get('modele') || '',
+    search: searchParams.get('search') || '',
+  });
+  
+  useEffect(() => {
+    async function fetchMotos() {
+      setLoading(true);
+      try {
+        // Convertir les filtres pour getMotos (ignorer les valeurs vides)
+        const apiFilters = {
+          page: filters.page,
+          ...(filters.etat && { etat: filters.etat as EtatEntite }),
+          ...(filters.modele && { modele: filters.modele }),
+          ...(filters.search && { search: filters.search }),
+        };
+        
+        const result = await getMotos(apiFilters);
+        setMotos(result.data);
+        setPagination(result.pagination);
+      } catch (error) {
+        console.error('Failed to fetch motos:', error);
+      } finally {
+        setLoading(false);
+      }
+    }
+    
+    fetchMotos();
+    
+    // Mettre à jour l'URL avec les filtres
+    const params = new URLSearchParams();
+    if (filters.page > 1) params.set('page', filters.page.toString());
+    if (filters.etat) params.set('etat', filters.etat);
+    if (filters.modele) params.set('modele', filters.modele);
+    if (filters.search) params.set('search', filters.search);
+    
+    const newUrl = `${window.location.pathname}?${params.toString()}`;
+    router.push(newUrl, { scroll: false });
+  }, [filters]);
+  
+  function changePage(page: number) {
+    setFilters(prev => ({ ...prev, page }));
+  }
+  
+  function applyFilters(newFilters: Partial<typeof filters>) {
+    // Réinitialiser la page à 1 lors du changement de filtres
+    setFilters(prev => ({ ...prev, ...newFilters, page: 1 }));
+  }
+  
+  function getEtatBadgeColor(etat: EtatEntite) {
+    switch (etat) {
+      case 'DISPONIBLE': return 'bg-green-500';
+      case 'EN_MAINTENANCE': return 'bg-orange-500';
+      case 'HORS_SERVICE': return 'bg-red-500';
+      case 'A_VERIFIER': return 'bg-yellow-500';
+      case 'INDISPONIBLE': return 'bg-gray-500';
+      default: return 'bg-gray-500';
+    }
+  }
+  
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col sm:flex-row gap-4">
+        <Input
+          placeholder="Recherche..."
+          value={filters.search}
+          onChange={e => applyFilters({ search: e.target.value })}
+          className="max-w-xs"
+        />
+        
+        <Select
+          value={filters.etat}
+          onValueChange={value => applyFilters({ etat: value })}
+        >
+          <SelectTrigger className="max-w-xs">
+            <SelectValue placeholder="État" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="">Tous les états</SelectItem>
+            <SelectItem value="DISPONIBLE">Disponible</SelectItem>
+            <SelectItem value="EN_MAINTENANCE">En maintenance</SelectItem>
+            <SelectItem value="HORS_SERVICE">Hors service</SelectItem>
+            <SelectItem value="A_VERIFIER">À vérifier</SelectItem>
+            <SelectItem value="INDISPONIBLE">Indisponible</SelectItem>
+          </SelectContent>
+        </Select>
+        
+        <Select
+          value={filters.modele}
+          onValueChange={value => applyFilters({ modele: value })}
+        >
+          <SelectTrigger className="max-w-xs">
+            <SelectValue placeholder="Modèle" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="">Tous les modèles</SelectItem>
+            <SelectItem value="YZF-R 125">YZF-R 125</SelectItem>
+            <SelectItem value="MT 125">MT 125</SelectItem>
+          </SelectContent>
+        </Select>
+        
+        <Button
+          variant="outline"
+          onClick={() => applyFilters({ search: '', etat: '', modele: '' })}
+        >
+          Réinitialiser
+        </Button>
+      </div>
+      
+      {loading ? (
+        <div className="flex justify-center p-8">
+          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full"></div>
+        </div>
+      ) : motos.length === 0 ? (
+        <div className="text-center p-8">
+          Aucune moto trouvée avec les filtres actuels.
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {motos.map(moto => (
+            <Card key={moto.id} className="overflow-hidden">
+              <CardHeader className="pb-2">
+                <div className="flex justify-between items-start">
+                  <CardTitle className="text-lg">{moto.numSerie}</CardTitle>
+                  <Badge className={getEtatBadgeColor(moto.etat)}>
+                    {moto.etat}
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="pb-2">
+                <div className="space-y-1 text-sm">
+                  <p><strong>Modèle:</strong> {moto.modele}</p>
+                  <p><strong>Kilométrage:</strong> {moto.kilometrage} km</p>
+                  <p>
+                    <strong>Moteur monté:</strong> {
+                      moto.moteurCourant 
+                        ? moto.moteurCourant.numSerie 
+                        : "Aucun"
+                    }
+                  </p>
+                </div>
+              </CardContent>
+              <CardFooter>
+                <Button 
+                  variant="default" 
+                  size="sm"
+                  onClick={() => router.push(`/dashboard/motos/${moto.id}`)}
+                  className="w-full"
+                >
+                  Voir détails
+                </Button>
+              </CardFooter>
+            </Card>
+          ))}
+        </div>
+      )}
+      
+      {pagination.pageCount > 1 && (
+        <div className="flex justify-center mt-8">
+          <Pagination
+            currentPage={pagination.currentPage}
+            totalPages={pagination.pageCount}
+            onPageChange={changePage}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+### Exemple 3: Enregistrement d'une session d'utilisation avec FormEnregistrementSession
+
+```tsx
+'use client'
+
+import { useState, useEffect } from 'react';
+import { getMotos } from '@/app/actions/motos';
+import { EtatEntite } from '@prisma/client';
+import { FormEnregistrementSession } from '@/components/forms/form-enregistrement-session';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+
+export default function EnregistrementSessionPage() {
+  const [motos, setMotos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  
+  useEffect(() => {
+    async function fetchDisponibleMotos() {
+      try {
+        // Récupérer uniquement les motos disponibles
+        const result = await getMotos({
+          etat: EtatEntite.DISPONIBLE,
+          limit: 100 // Une limite élevée pour récupérer toutes les motos disponibles
+        });
+        
+        // Filtrer les motos qui ont un moteur monté
+        const motosAvecMoteur = result.data.filter(moto => moto.moteurCourantId);
+        setMotos(motosAvecMoteur);
+      } catch (error) {
+        console.error('Failed to fetch available motos:', error);
+      } finally {
+        setLoading(false);
+      }
+    }
+    
+    fetchDisponibleMotos();
+  }, []);
+  
+  function handleSuccess(data) {
+    // Mettre à jour la liste des motos ou afficher une notification
+    // (cette fonction est passée au composant FormEnregistrementSession)
+  }
+  
+  if (loading) {
+    return (
+      <div className="flex justify-center p-8">
+        <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full"></div>
+      </div>
+    );
+  }
+  
+  if (motos.length === 0) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Aucune moto disponible</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p>Il n'y a pas de motos disponibles avec un moteur monté pour enregistrer une session.</p>
+        </CardContent>
+      </Card>
+    );
+  }
+  
+  return (
+    <div>
+      <h1 className="text-2xl font-bold mb-6">Enregistrer une session d'utilisation</h1>
+      
+      <FormEnregistrementSession
+        motos={motos.map(moto => ({
+          id: moto.id,
+          numSerie: moto.numSerie,
+          modele: moto.modele,
+          kilometrage: moto.kilometrage
+        }))}
+        onSuccess={handleSuccess}
+      />
+    </div>
+  );
+}
+```
+
+### Exemple 4: Tableau de bord avec graphiques et statistiques
+
+```tsx
+'use client'
+
+import { useState, useEffect } from 'react';
+import { getDashboardData, getUtilisationHebdomadaire } from '@/app/actions/dashboard';
+import { 
+  Card, CardContent, CardDescription, CardHeader, CardTitle 
+} from '@/components/ui/card';
+import { 
+  BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, 
+  Tooltip, Legend, ResponsiveContainer 
+} from 'recharts';
+
+export default function Dashboard() {
+  const [dashboardData, setDashboardData] = useState(null);
+  const [utilisationData, setUtilisationData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  
+  useEffect(() => {
+    async function fetchDashboardData() {
+      try {
+        const [dashData, utilisationHebdo] = await Promise.all([
+          getDashboardData(),
+          getUtilisationHebdomadaire()
+        ]);
+        
+        setDashboardData(dashData);
+        setUtilisationData(utilisationHebdo);
+      } catch (error) {
+        console.error('Failed to fetch dashboard data:', error);
+      } finally {
+        setLoading(false);
+      }
+    }
+    
+    fetchDashboardData();
+  }, []);
+  
+  if (loading) {
+    return (
+      <div className="flex justify-center p-8">
+        <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full"></div>
+      </div>
+    );
+  }
+  
+  if (!dashboardData) {
+    return (
+      <div className="text-center p-8">
+        Erreur lors du chargement des données du tableau de bord.
+      </div>
+    );
+  }
+  
+  return (
+    <div className="space-y-6">
+      {/* Aperçu du parc */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Total motos</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-bold">{dashboardData.cycles.total}</p>
+            <p className="text-xs text-muted-foreground">
+              {dashboardData.cycles.disponibles} disponibles
+            </p>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Total moteurs</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-bold">{dashboardData.moteurs.total}</p>
+            <p className="text-xs text-muted-foreground">
+              {dashboardData.moteurs.montes} montés, {dashboardData.moteurs.disponibles} disponibles
+            </p>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Coût maintenances</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-bold">{dashboardData.maintenances.coutTotal.toFixed(2)} €</p>
+            <p className="text-xs text-muted-foreground">
+              Total cumulé
+            </p>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Alertes actives</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-bold">{dashboardData.alertes.piecesStockBas.length}</p>
+            <p className="text-xs text-muted-foreground">
+              Pièces en stock bas
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+      
+      {/* Graphique d'utilisation hebdomadaire */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Utilisation hebdomadaire</CardTitle>
+          <CardDescription>
+            Kilométrage parcouru par jour ces 7 derniers jours
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={utilisationData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="jour" />
+                <YAxis />
+                <Tooltip />
+                <Legend />
+                <Bar dataKey="distanceTotale" name="Distance (km)" fill="#4f46e5" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </CardContent>
+      </Card>
+      
+      {/* Activité récente et alertes */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card>
+          <CardHeader>
+            <CardTitle>Derniers contrôles</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {dashboardData.activite.controles.slice(0, 5).map((controle) => (
+                <div key={controle.id} className="flex items-start space-x-4">
+                  <div className={`w-2 h-2 mt-2 rounded-full ${controle.estConforme ? 'bg-green-500' : 'bg-red-500'}`} />
+                  <div>
+                    <p className="font-medium">{controle.cycle.numSerie}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {new Date(controle.date).toLocaleDateString()} par {controle.controleur}
+                      {!controle.estConforme && (
+                        <span className="text-red-500"> - Non conforme</span>
+                      )}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader>
+            <CardTitle>Stock bas</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {dashboardData.alertes.piecesStockBas.map((piece) => (
+                <div key={piece.id} className="flex items-start space-x-4">
+                  <div className={`w-2 h-2 mt-2 rounded-full ${piece.quantiteStock === 0 ? 'bg-red-500' : 'bg-yellow-500'}`} />
+                  <div>
+                    <p className="font-medium">{piece.nom}</p>
+                    <p className="text-sm text-muted-foreground">
+                      Stock: {piece.quantiteStock}/{piece.quantiteMinimale} - Réf: {piece.reference}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+```
+
+### Exemple 5: Formulaire de montage de moteur
+
+```tsx
+'use client'
+
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { getMoteurs } from '@/app/actions/moteurs';
+import { monterMoteur } from '@/app/actions/moteurs';
+import { EtatEntite } from '@prisma/client';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+
+import { Button } from '@/components/ui/button';
+import { 
+  Form, FormControl, FormField, FormItem, FormLabel, FormMessage 
+} from '@/components/ui/form';
+import { Input } from '@/components/ui/input';
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
+import { toast } from '@/components/ui/use-toast';
+
+// Schéma de validation pour le formulaire
+const formSchema = z.object({
+  moteurId: z.string().min(1, "Un moteur doit être sélectionné"),
+  technicien: z.string().min(2, "Le nom du technicien est requis"),
+  notes: z.string().optional(),
+});
+
+export default function MontageMoteurForm({ cycleId, numSerieCycle }) {
+  const router = useRouter();
+  const [moteursDisponibles, setMoteursDisponibles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  
+  const form = useForm<z.infer<typeof formSchema>>({
+    resolver: zodResolver(formSchema),
+    defaultValues: {
+      moteurId: '',
+      technicien: '',
+      notes: '',
+    },
+  });
+  
+  useEffect(() => {
+    async function fetchMoteursDisponibles() {
+      try {
+        // Récupérer uniquement les moteurs disponibles et non montés
+        const result = await getMoteurs({
+          etat: EtatEntite.DISPONIBLE,
+          estMonte: false,
+          limit: 100
+        });
+        
+        setMoteursDisponibles(result.data);
+      } catch (error) {
+        console.error('Failed to fetch available motors:', error);
+        toast({
+          title: "Erreur",
+          description: "Impossible de récupérer la liste des moteurs disponibles",
+          variant: "destructive"
+        });
+      } finally {
+        setLoading(false);
+      }
+    }
+    
+    fetchMoteursDisponibles();
+  }, []);
+  
+  async function onSubmit(values: z.infer<typeof formSchema>) {
+    setSubmitting(true);
+    
+    try {
+      const result = await monterMoteur({
+        moteurId: values.moteurId,
+        cycleId,
+        technicien: values.technicien,
+        date: new Date(),
+        notes: values.notes
+      });
+      
+      if (result.success) {
+        toast({
+          title: "Moteur monté",
+          description: `Le moteur a été monté avec succès sur la moto ${numSerieCycle}`
+        });
+        
+        router.refresh();
+        router.push(`/dashboard/motos/${cycleId}`);
+      } else {
+        toast({
+          title: "Erreur",
+          description: result.error || "Une erreur est survenue lors du montage du moteur",
+          variant: "destructive"
+        });
+      }
+    } catch (error) {
+      console.error('Error:', error);
+      toast({
+        title: "Erreur",
+        description: "Une erreur inattendue est survenue",
+        variant: "destructive"
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+  
+  if (loading) {
+    return (
+      <div className="flex justify-center p-8">
+        <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full"></div>
+      </div>
+    );
+  }
+  
+  if (moteursDisponibles.length === 0) {
+    return (
+      <div className="p-6 border rounded-md bg-muted">
+        <h2 className="text-lg font-semibold mb-2">Aucun moteur disponible</h2>
+        <p>Il n'y a pas de moteurs disponibles pour le montage. Veuillez d'abord ajouter ou libérer un moteur.</p>
+        <Button 
+          className="mt-4"
+          onClick={() => router.push('/dashboard/moteurs')}
+        >
+          Gérer les moteurs
+        </Button>
+      </div>
+    );
+  }
+  
+  return (
+    <Form {...form}>
+      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+        <div className="p-4 bg-muted rounded-md mb-4">
+          <p className="font-medium">Montage de moteur pour:</p>
+          <p>{numSerieCycle}</p>
+        </div>
+        
+        <FormField
+          control={form.control}
+          name="moteurId"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Moteur à monter</FormLabel>
+              <Select 
+                onValueChange={field.onChange} 
+                defaultValue={field.value}
+                disabled={submitting}
+              >
+                <FormControl>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Sélectionner un moteur" />
+                  </SelectTrigger>
+                </FormControl>
+                <SelectContent>
+                  {moteursDisponibles.map(moteur => (
+                    <SelectItem key={moteur.id} value={moteur.id}>
+                      {moteur.numSerie} ({moteur.type}) - {moteur.kilometrage} km
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+        
+        <FormField
+          control={form.control}
+          name="technicien"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Technicien</FormLabel>
+              <FormControl>
+                <Input {...field} disabled={submitting} />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+        
+        <FormField
+          control={form.control}
+          name="notes"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Notes (optionnel)</FormLabel>
+              <FormControl>
+                <Textarea {...field} disabled={submitting} />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+        
+        <div className="flex gap-4">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => router.back()}
+            disabled={submitting}
+          >
+            Annuler
+          </Button>
+          
+          <Button type="submit" disabled={submitting}>
+            {submitting ? 'Montage...' : 'Monter le moteur'}
+          </Button>
+        </div>
+      </form>
+    </Form>
+  );
+}
+```
+
+## Conclusion
+
+Les Server Actions fournissent une base solide pour l'interaction avec la base de données et la logique métier du système de gestion des motos. En suivant les bonnes pratiques d'intégration avec l'interface utilisateur, vous pouvez créer une expérience utilisateur fluide et réactive.
+
+Pour plus d'informations sur les composants UI utilisés dans ces exemples, reportez-vous à la documentation de shadcn/UI et à la structure des composants personnalisés de votre projet.
+
+Si vous avez des questions sur l'intégration d'une Server Action spécifique ou sur l'utilisation de fonctionnalités avancées, n'hésitez pas à consulter cette documentation ou à contacter l'équipe de développement.
