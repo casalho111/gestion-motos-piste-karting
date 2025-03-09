@@ -1,67 +1,173 @@
-// Types communs pour les stores
+import { EtatEntite } from '@prisma/client';
+import { z } from 'zod';
+import { partieCycleSchema } from '@/lib/validations';
+import { TypePiece } from '@prisma/client';
+import { pieceSchema } from '@/lib/validations';
+import { TypeEntretien } from '@prisma/client';
+import { maintenanceSchema } from '@/lib/validations';
 
-export type Status = 'idle' | 'loading' | 'success' | 'error';
 
-// Type générique pour les états de requête
-export interface QueryState<T> {
-  data: T | null;
-  status: Status;
-  error: string | null;
-  timestamp: number | null;
+export type Theme = 'light' | 'dark' | 'system';
+export type ViewMode = 'card' | 'table';
+export type DensityMode = 'compact' | 'comfortable';
+
+// Type représentant une moto dans le frontend
+export interface Moto {
+  id: string;
+  numSerie: string;
+  modele: string;
+  dateAcquisition: Date;
+  kilometrage: number;
+  etat: EtatEntite;
+  notesEtat: string | null;
+  couleur: string | null;
+  moteurCourantId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  moteurCourant?: MotoMoteur | null;
+  controles?: any[];
+  maintenances?: any[];
+  utilisations?: any[];
+  historiquesMontage?: any[];
 }
 
-// Interface générique pour la pagination
+// Type pour les moteurs liés aux motos
+export interface MotoMoteur {
+  id: string;
+  numSerie: string;
+  type: string;
+  cylindree: number;
+  dateAcquisition: Date;
+  kilometrage: number;
+  heuresMoteur: number | null;
+  etat: EtatEntite;
+  notesEtat: string | null;
+}
+
+export interface MoteurFilterOptions extends FilterOptions {
+  estMonte?: boolean;
+}
+
+// Type pour les réponses des Server Actions
+export interface ServerActionResponse<T = any> {
+  success: boolean;
+  data?: T;
+  error?: string;
+  validationErrors?: any[];
+}
+
 export interface PaginationState {
-  page: number;
-  limit: number;
-  total: number;
+  currentPage: number;
   totalPages: number;
+  totalItems: number;
+  perPage: number;
 }
 
-// Type pour le résultat d'une requête paginée
-export interface PaginatedResult<T> {
-  data: T[];
-  pagination: {
+export interface FilterOptions {
+  search?: string;
+  etat?: EtatEntite;
+  modele?: string;
+}
+
+export type Piece = z.infer<typeof pieceSchema> & {
+  id: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export interface PieceFilterOptions extends FilterOptions {
+  type?: TypePiece;
+  stockBas?: boolean;
+}
+
+export interface PartieCycle {
+  id: string;
+  nom: string;
+  type: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type Maintenance = z.infer<typeof maintenanceSchema> & {
+  id: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export interface MaintenanceFilterOptions extends FilterOptions {
+  type?: TypeEntretien;
+  cycleId?: string;
+  moteurId?: string;
+  dateDebut?: Date;
+  dateFin?: Date;
+}
+
+export interface PieceUtilisee {
+  pieceId: string;
+  quantite: number;
+  prixUnitaire?: number;
+} 
+
+export interface DashboardStats {
+  cycles: {
     total: number;
-    pageCount: number;
-    currentPage: number;
-    perPage: number;
+    disponibles: number;
+    enMaintenance: number;
+    aVerifier: number;
+    horsService: number;
+  };
+  moteurs: {
+    total: number;
+    disponibles: number;
+    montes: number;
+    enMaintenance: number;
+    horsService: number;
+  };
+  maintenances: {
+    recentes: any[]; // Simplifié pour cet exemple
+    coutTotal: number;
+  };
+  alertes: {
+    piecesStockBas: any[]; // Simplifié pour cet exemple
+  };
+  activite: {
+    controles: any[]; // Simplifié pour cet exemple
+    montages: any[]; // Simplifié pour cet exemple
+  };
+  utilisation: {
+    hebdomadaire: any[]; // Simplifié pour cet exemple
   };
 }
 
-// Type générique pour un formulaire
-export interface FormState<T> {
-  data: Partial<T>;
-  errors: Record<string, string>;
-  status: Status;
+export interface MaintenanceStats {
+  total: {
+    count: number;
+    cout: number;
+  };
+  coutParType: Record<string, number>;
+  coutParModele: Record<string, number>;
+  piecesLesPlusUtilisees: any[]; // Simplifié pour cet exemple
+  maintenances: any[]; // Simplifié pour cet exemple
 }
 
-// Type pour les filtres génériques
-export interface FilterState {
-  search: string;
-  sortBy: string | null;
-  sortDirection: 'asc' | 'desc';
-  [key: string]: any;
+export interface UtilisationStats {
+  cycle: {
+    id: string;
+    numSerie: string;
+    modele: string;
+  };
+  totalDistance: number;
+  totalTours: number;
+  sessionCount: number;
+  utilisations: any[]; // Simplifié pour cet exemple
 }
 
-// Types pour les préférences utilisateur
-export interface ThemePreference {
-  theme: 'light' | 'dark' | 'system';
-  reducedMotion: boolean;
-  fontSize: 'small' | 'medium' | 'large';
+export interface TimeRangeOption {
+  label: string;
+  value: 'today' | 'week' | 'month' | 'quarter' | 'year' | 'custom';
+  dateRange?: {
+    start: Date;
+    end: Date;
+  };
 }
 
-export interface UIPreference {
-  sidebarCollapsed: boolean;
-  tableCompactMode: boolean;
-  cardsPerRow: number;
-  showNotifications: boolean;
-  dashboardLayout: string[];
-}
-
-// Interface pour le cache
-export interface CacheEntry<T> {
-  data: T;
-  timestamp: number;
-  expires: number;
-}

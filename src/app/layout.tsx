@@ -4,6 +4,7 @@ import "./globals.css";
 import { StoreProvider } from '@/components/providers/StoreProvider';
 import { Toaster } from '@/components/ui/sonner';
 import { ThemeProvider } from '@/components/providers/ThemeProvider';
+import { ThemeSync } from '@/components/providers/ThemeSync';
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -33,6 +34,7 @@ export default function RootLayout({
           defaultTheme="system"
           enableSystem
         >
+           <ThemeSync />
           <StoreProvider>
             {children}
             <Toaster />

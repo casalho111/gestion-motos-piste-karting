@@ -1,325 +1,267 @@
 import { StateCreator } from 'zustand';
-import { QueryState } from '../types';
-import { getDashboardData, getUtilisationHebdomadaire } from '@/app/actions/dashboard';
-import { getMaintenanceStats } from '@/app/actions/stats';
-import { getUtilisationStats } from '@/app/actions/utilisations';
-
-// Types pour les statistiques
-export interface DashboardData {
-  cycles: {
-    total: number;
-    disponibles: number;
-    enMaintenance: number;
-    aVerifier: number;
-    horsService: number;
+import { immer } from 'zustand/middleware/immer';
+import {
+  DashboardStats,
+  MaintenanceStats,
+  UtilisationStats,
+  TimeRangeOption
+} from '../types';
+import {
+  getDashboardData,
+  getUtilisationHebdomadaire
+ } from '@/app/actions/dashboard';
+ import {
+  getMaintenanceStats
+ } from '@/app/actions/stats';
+ import {
+  getUtilisationStats
+ } from '@/app/actions/utilisations';
+ 
+ export interface StatsState {
+  dashboardStats: DashboardStats | null;
+  maintenanceStats: MaintenanceStats | null;
+  utilisationStats: UtilisationStats[] | null;
+  utilisationHebdomadaire: any[] | null;
+  isLoading: boolean;
+  error: string | null;
+  selectedTimeRange: TimeRangeOption;
+  customDateRange: {
+    start: Date | null;
+    end: Date | null;
   };
-  moteurs: {
-    total: number;
-    disponibles: number;
-    montes: number;
-    enMaintenance: number;
-    horsService: number;
+  lastFetched: {
+    dashboard: number | null;
+    maintenance: number | null;
+    utilisation: number | null;
   };
-  maintenances: {
-    recentes: any[];
-    coutTotal: number;
-  };
-  alertes: {
-    piecesStockBas: any[];
-  };
-  activite: {
-    controles: any[];
-    montages: any[];
-  };
-  utilisation: {
-    hebdomadaire: any[];
-  };
-  motosAvecEtat?: any[];
-  controleManquants?: any[];
-  prochainesMaintenances?: any[];
-  alertesCreees?: any[];
-  alertesStats?: any;
-  planningsGeneres?: any[];
-  planningStats?: any;
-}
-
-export interface MaintenanceStats {
-  total: {
-    count: number;
-    cout: number;
-  };
-  coutParType: Record<string, number>;
-  coutParModele: Record<string, number>;
-  piecesLesPlusUtilisees: any[];
-  maintenances: any[];
-}
-
-export interface UtilisationStats {
-  cycle: {
-    id: string;
-    numSerie: string;
-    modele: string;
-  };
-  totalDistance: number;
-  totalTours: number;
-  sessionCount: number;
-  utilisations: any[];
-}
-
-export interface PeriodeDate {
-  debut: Date;
-  fin: Date;
-}
-
-export interface StatsSlice {
-  // États de différentes statistiques
-  dashboard: QueryState<DashboardData>;
-  utilisationHebdomadaire: QueryState<any[]>;
-  maintenanceStats: QueryState<MaintenanceStats>;
-  utilisationStats: QueryState<UtilisationStats[]>;
-  
-  // Période sélectionnée pour les statistiques
-  periodeMaintenance: PeriodeDate;
-  periodeUtilisation: PeriodeDate;
-  
-  // Actions pour charger les statistiques
-  fetchDashboardData: () => Promise<void>;
+ }
+ 
+ export interface StatsActions {
+  fetchDashboardStats: () => Promise<void>;
+  fetchMaintenanceStats: (dateDebut?: Date, dateFin?: Date) => Promise<void>;
+  fetchUtilisationStats: (dateDebut?: Date, dateFin?: Date) => Promise<void>;
   fetchUtilisationHebdomadaire: () => Promise<void>;
-  fetchMaintenanceStats: () => Promise<void>;
-  fetchUtilisationStats: () => Promise<void>;
+  setTimeRange: (range: TimeRangeOption) => void;
+  setCustomDateRange: (start: Date | null, end: Date | null) => void;
+  applySelectedTimeRange: () => Promise<void>;
+  refreshAllStats: () => Promise<void>;
+ }
+ 
+ export type StatsSlice = StatsState & StatsActions;
+ 
+ // Durée de mise en cache : 5 minutes pour les données de tableau de bord
+ const DASHBOARD_CACHE_DURATION = 5 * 60 * 1000;
+ 
+ // Les plages de temps prédéfinies
+ const timeRangeOptions: TimeRangeOption[] = [
+  { label: "Aujourd'hui", value: 'today' },
+  { label: '7 derniers jours', value: 'week' },
+  { label: '30 derniers jours', value: 'month' },
+  { label: 'Trimestre', value: 'quarter' },
+  { label: 'Année', value: 'year' },
+  { label: 'Personnalisé', value: 'custom' }
+ ];
+ 
+ // Fonction utilitaire pour calculer la plage de dates en fonction de l'option sélectionnée
+ const getDateRangeFromOption = (option: TimeRangeOption): { start: Date, end: Date } => {
+  const end = new Date();
+  let start = new Date();
   
-  // Gestion des périodes
-  setPeriodeMaintenance: (periode: PeriodeDate) => void;
-  setPeriodeUtilisation: (periode: PeriodeDate) => void;
+  switch (option.value) {
+    case 'today':
+      start.setHours(0, 0, 0, 0);
+      break;
+    case 'week':
+      start.setDate(start.getDate() - 7);
+      break;
+    case 'month':
+      start.setDate(start.getDate() - 30);
+      break;
+    case 'quarter':
+      start.setMonth(start.getMonth() - 3);
+      break;
+    case 'year':
+      start.setFullYear(start.getFullYear() - 1);
+      break;
+    case 'custom':
+      if (option.dateRange) {
+        return option.dateRange;
+      }
+      // Par défaut, 30 derniers jours si pas de plage personnalisée
+      start.setDate(start.getDate() - 30);
+      break;
+  }
   
-  // Sélecteurs dérivés
-  getTauxDisponibilite: () => number;
-  getTauxUtilisation: () => number;
-  getCoutMoyenParKm: () => number;
-}
-
-export const createStatsSlice: StateCreator<StatsSlice, [], []> = (set, get) => {
-  // Fonction pour initialiser une date début/fin (par défaut: dernier mois)
-  const getDefaultPeriode = (): PeriodeDate => {
-    const maintenant = new Date();
-    const debut = new Date(maintenant);
-    debut.setMonth(debut.getMonth() - 1);
-    
-    return {
-      debut,
-      fin: maintenant
-    };
-  };
+  return { start, end };
+ };
+ 
+ const initialState: StatsState = {
+  dashboardStats: null,
+  maintenanceStats: null,
+  utilisationStats: null,
+  utilisationHebdomadaire: null,
+  isLoading: false,
+  error: null,
+  selectedTimeRange: timeRangeOptions[1], // Par défaut, 7 derniers jours
+  customDateRange: {
+    start: null,
+    end: null
+  },
+  lastFetched: {
+    dashboard: null,
+    maintenance: null,
+    utilisation: null
+  }
+ };
+ 
+export const createStatsSlice: StateCreator<
+  StatsSlice, 
+  [["zustand/immer", never]], 
+  [["zustand/immer", never]], 
+  StatsSlice
+ > = immer((set, get) => ({
+  ...initialState,
   
-  return {
-    // États initiaux
-    dashboard: {
-      data: null,
-      status: 'idle',
-      error: null,
-      timestamp: null
-    },
+  fetchDashboardStats: async () => {
+    const now = Date.now();
+    const lastFetched = get().lastFetched.dashboard;
     
-    utilisationHebdomadaire: {
-      data: null,
-      status: 'idle',
-      error: null,
-      timestamp: null
-    },
-    
-    maintenanceStats: {
-      data: null,
-      status: 'idle',
-      error: null,
-      timestamp: null
-    },
-    
-    utilisationStats: {
-      data: null,
-      status: 'idle',
-      error: null,
-      timestamp: null
-    },
-    
-    // Périodes par défaut
-    periodeMaintenance: getDefaultPeriode(),
-    periodeUtilisation: getDefaultPeriode(),
-    
-    // Actions pour charger les statistiques
-    fetchDashboardData: async () => {
-      try {
-        set(state => ({
-          dashboard: { ...state.dashboard, status: 'loading', error: null }
-        }));
-        
-        const result = await getDashboardData();
-        
-        set({
-          dashboard: {
-            data: result as DashboardData,
-            status: 'success',
-            error: null,
-            timestamp: Date.now()
-          }
-        });
-      } catch (error) {
-        set(state => ({
-          dashboard: {
-            ...state.dashboard,
-            status: 'error',
-            error: error instanceof Error ? error.message : 'Erreur lors du chargement des données du dashboard',
-          }
-        }));
-      }
-    },
-    
-    fetchUtilisationHebdomadaire: async () => {
-      try {
-        set(state => ({
-          utilisationHebdomadaire: { ...state.utilisationHebdomadaire, status: 'loading', error: null }
-        }));
-        
-        const result = await getUtilisationHebdomadaire();
-        
-        set({
-          utilisationHebdomadaire: {
-            data: result,
-            status: 'success',
-            error: null,
-            timestamp: Date.now()
-          }
-        });
-      } catch (error) {
-        set(state => ({
-          utilisationHebdomadaire: {
-            ...state.utilisationHebdomadaire,
-            status: 'error',
-            error: error instanceof Error ? error.message : 'Erreur lors du chargement des données d\'utilisation hebdomadaire',
-          }
-        }));
-      }
-    },
-    
-    fetchMaintenanceStats: async () => {
-      try {
-        const { periodeMaintenance } = get();
-        
-        set(state => ({
-          maintenanceStats: { ...state.maintenanceStats, status: 'loading', error: null }
-        }));
-        
-        const result = await getMaintenanceStats(
-          periodeMaintenance.debut, 
-          periodeMaintenance.fin
-        );
-        
-        set({
-          maintenanceStats: {
-            data: result as MaintenanceStats,
-            status: 'success',
-            error: null,
-            timestamp: Date.now()
-          }
-        });
-      } catch (error) {
-        set(state => ({
-          maintenanceStats: {
-            ...state.maintenanceStats,
-            status: 'error',
-            error: error instanceof Error ? error.message : 'Erreur lors du chargement des statistiques de maintenance',
-          }
-        }));
-      }
-    },
-    
-    fetchUtilisationStats: async () => {
-      try {
-        const { periodeUtilisation } = get();
-        
-        set(state => ({
-          utilisationStats: { ...state.utilisationStats, status: 'loading', error: null }
-        }));
-        
-        const result = await getUtilisationStats(
-          periodeUtilisation.debut, 
-          periodeUtilisation.fin
-        );
-        
-        set({
-          utilisationStats: {
-            data: result as UtilisationStats[],
-            status: 'success',
-            error: null,
-            timestamp: Date.now()
-          }
-        });
-      } catch (error) {
-        set(state => ({
-          utilisationStats: {
-            ...state.utilisationStats,
-            status: 'error',
-            error: error instanceof Error ? error.message : 'Erreur lors du chargement des statistiques d\'utilisation',
-          }
-        }));
-      }
-    },
-    
-    // Gestion des périodes
-    setPeriodeMaintenance: (periode) => set({ periodeMaintenance: periode }),
-    setPeriodeUtilisation: (periode) => set({ periodeUtilisation: periode }),
-    
-    // Sélecteurs dérivés
-    getTauxDisponibilite: () => {
-      const { dashboard } = get();
-      if (!dashboard.data) return 0;
-      
-      const { cycles } = dashboard.data;
-      if (cycles.total === 0) return 0;
-      
-      return (cycles.disponibles / cycles.total) * 100;
-    },
-    
-    getTauxUtilisation: () => {
-      const { utilisationStats } = get();
-      if (!utilisationStats.data || utilisationStats.data.length === 0) return 0;
-      
-      // Calculer le nombre total de jours de la période
-      const { periodeUtilisation } = get();
-      const joursPeriode = Math.ceil(
-        (periodeUtilisation.fin.getTime() - periodeUtilisation.debut.getTime()) / (1000 * 60 * 60 * 24)
-      );
-      
-      // Calculer le nombre total de sessions pour toutes les motos
-      const totalSessions = utilisationStats.data.reduce(
-        (total, stat) => total + stat.sessionCount, 
-        0
-      );
-      
-      // Taux d'utilisation = sessions / (nombre de motos * jours de la période)
-      const { dashboard } = get();
-      if (!dashboard.data) return 0;
-      
-      const nombreMotos = dashboard.data.cycles.total;
-      if (nombreMotos === 0 || joursPeriode === 0) return 0;
-      
-      return (totalSessions / (nombreMotos * joursPeriode)) * 100;
-    },
-    
-    getCoutMoyenParKm: () => {
-      const { maintenanceStats, utilisationStats } = get();
-      
-      if (!maintenanceStats.data || !utilisationStats.data) return 0;
-      
-      const coutTotal = maintenanceStats.data.total.cout;
-      
-      const distanceTotale = utilisationStats.data.reduce(
-        (total, stat) => total + stat.totalDistance, 
-        0
-      );
-      
-      if (distanceTotale === 0) return 0;
-      
-      return coutTotal / distanceTotale;
+    // Vérifier si on a récupéré les données récemment
+    if (lastFetched && (now - lastFetched) < DASHBOARD_CACHE_DURATION) {
+      return; // Utiliser les données en cache
     }
-  };
-};
+    
+    try {
+      set((state) => {
+        state.isLoading = true;
+        state.error = null;
+      });
+      
+      const dashboardData = await getDashboardData();
+      
+      set((state) => {
+        state.dashboardStats = dashboardData;
+        state.isLoading = false;
+        state.lastFetched.dashboard = now;
+      });
+    } catch (error) {
+      set((state) => {
+        state.isLoading = false;
+        state.error = error instanceof Error ? error.message : 'Une erreur est survenue';
+      });
+    }
+  },
+  
+  fetchMaintenanceStats: async (dateDebut, dateFin) => {
+    try {
+      set((state) => {
+        state.isLoading = true;
+        state.error = null;
+      });
+      
+      const maintenanceStats = await getMaintenanceStats(dateDebut, dateFin);
+      
+      set((state) => {
+        state.maintenanceStats = maintenanceStats;
+        state.isLoading = false;
+        state.lastFetched.maintenance = Date.now();
+      });
+    } catch (error) {
+      set((state) => {
+        state.isLoading = false;
+        state.error = error instanceof Error ? error.message : 'Une erreur est survenue';
+      });
+    }
+  },
+  
+  fetchUtilisationStats: async (dateDebut, dateFin) => {
+    try {
+      set((state) => {
+        state.isLoading = true;
+        state.error = null;
+      });
+      
+      const utilisationStats = await getUtilisationStats(dateDebut, dateFin);
+      
+      set((state) => {
+        state.utilisationStats = utilisationStats;
+        state.isLoading = false;
+        state.lastFetched.utilisation = Date.now();
+      });
+    } catch (error) {
+      set((state) => {
+        state.isLoading = false;
+        state.error = error instanceof Error ? error.message : 'Une erreur est survenue';
+      });
+    }
+  },
+  
+  fetchUtilisationHebdomadaire: async () => {
+    try {
+      set((state) => {
+        state.isLoading = true;
+        state.error = null;
+      });
+      
+      const utilisationHebdo = await getUtilisationHebdomadaire();
+      
+      set((state) => {
+        state.utilisationHebdomadaire = utilisationHebdo;
+        state.isLoading = false;
+      });
+    } catch (error) {
+      set((state) => {
+        state.isLoading = false;
+        state.error = error instanceof Error ? error.message : 'Une erreur est survenue';
+      });
+    }
+  },
+  
+  setTimeRange: (range) => {
+    set((state) => {
+      state.selectedTimeRange = range;
+    });
+  },
+  
+  setCustomDateRange: (start, end) => {
+    set((state) => {
+      state.customDateRange = { start, end };
+      if (start && end) {
+        state.selectedTimeRange = {
+          ...state.selectedTimeRange,
+          value: 'custom',
+          dateRange: { start, end }
+        };
+      }
+    });
+  },
+  
+  applySelectedTimeRange: async () => {
+    const { selectedTimeRange, customDateRange } = get();
+    
+    let dateRange;
+    
+    if (selectedTimeRange.value === 'custom' && customDateRange.start && customDateRange.end) {
+      dateRange = {
+        start: customDateRange.start,
+        end: customDateRange.end
+      };
+    } else {
+      dateRange = getDateRangeFromOption(selectedTimeRange);
+    }
+    
+    // Appliquer cette plage aux différentes statistiques
+    await Promise.all([
+      get().fetchMaintenanceStats(dateRange.start, dateRange.end),
+      get().fetchUtilisationStats(dateRange.start, dateRange.end)
+    ]);
+  },
+  
+  refreshAllStats: async () => {
+    await Promise.all([
+      get().fetchDashboardStats(),
+      get().fetchUtilisationHebdomadaire(),
+      get().applySelectedTimeRange() // Cela mettra à jour maintenanceStats et utilisationStats
+    ]);
+  }
+ }));

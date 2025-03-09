@@ -1,112 +1,67 @@
 import { StateCreator } from 'zustand';
-import { ThemePreference, UIPreference } from '../types';
+import { Theme, ViewMode, DensityMode } from '../types';
 
-export interface UISlice {
-  // Thème et préférences visuelles
-  theme: ThemePreference;
-  setTheme: (theme: Partial<ThemePreference>) => void;
-  
-  // Préférences d'interface
-  ui: UIPreference;
-  setUI: (preferences: Partial<UIPreference>) => void;
-  toggleSidebar: () => void;
-  
-  // Navigation et routage
-  currentPage: string;
-  setCurrentPage: (page: string) => void;
-  
-  // Modales et fenêtres
-  modals: {
-    [key: string]: boolean;
-  };
-  openModal: (modalId: string) => void;
-  closeModal: (modalId: string) => void;
-  toggleModal: (modalId: string) => void;
-  
-  // Notifications temporaires (toasts)
-  toasts: Array<{
-    id: string;
-    type: 'info' | 'success' | 'warning' | 'error';
-    message: string;
-    duration: number;
-  }>;
-  addToast: (toast: { type: 'info' | 'success' | 'warning' | 'error'; message: string; duration?: number }) => void;
-  removeToast: (id: string) => void;
-  
-  // État de chargement global
-  isLoading: boolean;
-  setIsLoading: (loading: boolean) => void;
+export interface UIState {
+  theme: Theme;
+  sidebarCollapsed: boolean;
+  viewMode: Record<string, ViewMode>; // Par section (motos, moteurs, etc.)
+  density: DensityMode;
+  mobileSidebarOpen: boolean;
+  dashboardLayout: string[];
 }
 
-// Valeurs par défaut pour les préférences
-const defaultTheme: ThemePreference = {
+export interface UIActions {
+  setTheme: (theme: Theme) => void;
+  toggleSidebar: () => void;
+  setViewMode: (section: string, mode: ViewMode) => void;
+  setDensity: (density: DensityMode) => void;
+  toggleMobileSidebar: () => void;
+  setDashboardLayout: (layout: string[]) => void;
+  resetUIPreferences: () => void;
+}
+
+export type UISlice = UIState & UIActions;
+
+// Configuration par défaut
+const initialState: UIState = {
   theme: 'system',
-  reducedMotion: false,
-  fontSize: 'medium'
-};
-
-const defaultUI: UIPreference = {
   sidebarCollapsed: false,
-  tableCompactMode: false,
-  cardsPerRow: 3,
-  showNotifications: true,
-  dashboardLayout: ['stats', 'motos', 'moteurs', 'maintenances']
+  viewMode: {
+    motos: 'card',
+    moteurs: 'card',
+    pieces: 'table',
+    maintenances: 'table',
+  },
+  density: 'comfortable',
+  mobileSidebarOpen: false,
+  dashboardLayout: ['stats', 'alerts', 'maintenance', 'utilization'],
 };
 
-export const createUISlice: StateCreator<UISlice, [], []> = (set) => ({
-  // Thème et préférences visuelles
-  theme: defaultTheme,
-  setTheme: (newTheme) => set((state) => ({
-    theme: { ...state.theme, ...newTheme }
+export const createUISlice: StateCreator<
+  UISlice, 
+  [], 
+  [], 
+  UISlice
+> = (set) => ({
+  ...initialState,
+  
+  setTheme: (theme) => set({ theme }),
+  
+  toggleSidebar: () => set((state) => ({ 
+    sidebarCollapsed: !state.sidebarCollapsed 
   })),
   
-  // Préférences d'interface
-  ui: defaultUI,
-  setUI: (preferences) => set((state) => ({
-    ui: { ...state.ui, ...preferences }
-  })),
-  toggleSidebar: () => set((state) => ({
-    ui: { ...state.ui, sidebarCollapsed: !state.ui.sidebarCollapsed }
+  setViewMode: (section, mode) => set((state) => ({
+    viewMode: { ...state.viewMode, [section]: mode }
   })),
   
-  // Navigation et routage
-  currentPage: '/dashboard',
-  setCurrentPage: (page) => set({ currentPage: page }),
+  setDensity: (density) => set({ density }),
   
-  // Modales et fenêtres
-  modals: {},
-  openModal: (modalId) => set((state) => ({
-    modals: { ...state.modals, [modalId]: true }
-  })),
-  closeModal: (modalId) => set((state) => ({
-    modals: { ...state.modals, [modalId]: false }
-  })),
-  toggleModal: (modalId) => set((state) => ({
-    modals: { ...state.modals, [modalId]: !state.modals[modalId] }
+  toggleMobileSidebar: () => set((state) => ({
+    mobileSidebarOpen: !state.mobileSidebarOpen
   })),
   
-  // Notifications temporaires (toasts)
-  toasts: [],
-  addToast: (toast) => {
-    const id = Date.now().toString();
-    const duration = toast.duration || 5000; // Valeur par défaut: 5 secondes
-    
-    set((state) => ({
-      toasts: [...state.toasts, { id, ...toast, duration }]
-    }));
-    
-    // Auto-suppression après la durée spécifiée
-    setTimeout(() => {
-      set((state) => ({
-        toasts: state.toasts.filter((t) => t.id !== id)
-      }));
-    }, duration);
-  },
-  removeToast: (id) => set((state) => ({
-    toasts: state.toasts.filter((toast) => toast.id !== id)
-  })),
+  setDashboardLayout: (layout) => set({ dashboardLayout: layout }),
   
-  // État de chargement global
-  isLoading: false,
-  setIsLoading: (loading) => set({ isLoading: loading })
+  resetUIPreferences: () => set(initialState),
 });

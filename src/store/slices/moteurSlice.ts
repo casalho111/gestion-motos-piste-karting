@@ -1,284 +1,437 @@
 import { StateCreator } from 'zustand';
-import { QueryState, PaginationState, FilterState, PaginatedResult } from '../types';
 import { EtatEntite } from '@prisma/client';
-import { getMoteurs, getMoteurById, changeEtatMoteur, monterMoteur, demonterMoteur } from '@/app/actions/moteurs';
+import { immer } from 'zustand/middleware/immer';
+import { MotoMoteur, PaginationState, MoteurFilterOptions } from '../types';
+import { 
+  getMoteurs, 
+  getMoteurById, 
+  createMoteur, 
+  updateMoteur, 
+  changeEtatMoteur,
+  monterMoteur,
+  demonterMoteur
+} from '@/app/actions/moteurs';
 
-// Type pour un moteur avec ses relations
-export interface MoteurWithRelations {
-  id: string;
-  numSerie: string;
-  type: string;
-  cylindree: number;
-  dateAcquisition: Date;
-  kilometrage: number;
-  heuresMoteur?: number | null;
-  etat: EtatEntite;
-  notesEtat?: string | null;
-  cycleActuel?: {
-    id: string;
-    numSerie: string;
-    modele: string;
-  } | null;
-  // Relations additionnelles peuvent être ajoutées selon les besoins
-}
-
-// Type pour les filtres de moteur
-export interface MoteurFilters extends FilterState {
-  etat?: EtatEntite;
-  type?: string;
-  estMonte?: boolean;
-}
-
-export interface MoteurSlice {
-  // Liste des moteurs avec pagination et filtres
-  moteurs: QueryState<MoteurWithRelations[]>;
+export interface MoteurState {
+  moteurs: MotoMoteur[];
+  activeMoteur: MotoMoteur | null;
+  isLoading: boolean;
+  isLoadingDetails: boolean;
+  isMounting: boolean; // État spécifique pour les opérations de montage/démontage
+  error: string | null;
   pagination: PaginationState;
-  filters: MoteurFilters;
-  
-  // Moteur actuellement sélectionné
-  currentMoteur: QueryState<MoteurWithRelations>;
-  
-  // Actions
-  fetchMoteurs: () => Promise<void>;
-  fetchMoteurById: (id: string) => Promise<void>;
-  changeEtat: (id: string, nouvelEtat: EtatEntite, notes?: string) => Promise<boolean>;
-  monterMoteurSurCycle: (moteurId: string, cycleId: string, technicien: string, notes?: string) => Promise<boolean>;
-  demonterMoteurDeCycle: (cycleId: string, technicien: string, notes?: string) => Promise<boolean>;
-  
-  // Gestion des filtres et pagination
-  setPage: (page: number) => void;
-  setLimit: (limit: number) => void;
-  setFilters: (filters: Partial<MoteurFilters>) => void;
-  resetFilters: () => void;
-  
-  // Sélecteurs dérivés
-  getMoteursDisponibles: () => MoteurWithRelations[];
-  getMoteursMontes: () => MoteurWithRelations[];
+  filters: MoteurFilterOptions;
+  cache: Record<string, { data: MotoMoteur, timestamp: number }>;
+  lastFetched: number | null;
 }
 
-// Valeurs par défaut
-const defaultPagination: PaginationState = {
-  page: 1,
-  limit: 10,
-  total: 0,
-  totalPages: 0
+export interface MoteurActions {
+  fetchMoteurs: (page?: number, options?: MoteurFilterOptions) => Promise<void>;
+  fetchMoteurById: (id: string, forceRefresh?: boolean) => Promise<MotoMoteur | null>;
+  createNewMoteur: (data: Partial<MotoMoteur>) => Promise<{ success: boolean; data?: MotoMoteur; error?: string | null }>;
+  updateExistingMoteur: (id: string, data: Partial<MotoMoteur>) => Promise<{ success: boolean; data?: MotoMoteur; error?: string | null }>;
+  changeMoteurStatus: (id: string, newStatus: EtatEntite, notes?: string) => Promise<{ success: boolean; data?: MotoMoteur; error?: string | null }>;
+  monterMoteurSurCycle: (params: { moteurId: string; cycleId: string; technicien: string; notes?: string }) => Promise<{ success: boolean; error?: string | null }>;
+  demonterMoteurDeCycle: (params: { cycleId: string; technicien: string; notes?: string }) => Promise<{ success: boolean; error?: string | null }>;
+  setFilters: (filters: MoteurFilterOptions) => void;
+  setPage: (page: number) => void;
+  clearCache: () => void;
+  invalidateCache: (id?: string) => void;
+}
+
+export type MoteurSlice = MoteurState & MoteurActions;
+
+// 30 minutes en millisecondes pour le cache
+const CACHE_DURATION = 30 * 60 * 1000;
+
+const initialState: MoteurState = {
+  moteurs: [],
+  activeMoteur: null,
+  isLoading: false,
+  isLoadingDetails: false,
+  isMounting: false,
+  error: null,
+  pagination: {
+    currentPage: 1,
+    totalPages: 1,
+    totalItems: 0,
+    perPage: 10
+  },
+  filters: {},
+  cache: {},
+  lastFetched: null
 };
 
-const defaultFilters: MoteurFilters = {
-  search: '',
-  sortBy: 'updatedAt',
-  sortDirection: 'desc',
-};
-
-export const createMoteurSlice: StateCreator<MoteurSlice, [], []> = (set, get) => ({
-  // État initial
-  moteurs: {
-    data: null,
-    status: 'idle',
-    error: null,
-    timestamp: null
+export const createMoteurSlice: StateCreator<
+  MoteurSlice, 
+  [["zustand/immer", never]], 
+  [["zustand/immer", never]], 
+  MoteurSlice
+> = immer((set, get) => ({
+  ...initialState,
+  
+  fetchMoteurs: async (page = 1, options = {}) => {
+    try {
+      set((state) => {
+        state.isLoading = true;
+        state.error = null;
+      });
+      
+      const filters = { ...get().filters, ...options };
+      const result = await getMoteurs({
+        page,
+        limit: get().pagination.perPage,
+        ...filters
+      });
+      
+      set((state) => {
+        state.moteurs = result.data;
+        state.pagination = {
+          currentPage: result.pagination.currentPage,
+          totalPages: result.pagination.pageCount,
+          totalItems: result.pagination.total,
+          perPage: result.pagination.perPage
+        };
+        state.filters = filters;
+        state.isLoading = false;
+        state.lastFetched = Date.now();
+      });
+    } catch (error) {
+      set((state) => {
+        state.isLoading = false;
+        state.error = error instanceof Error ? error.message : 'Une erreur est survenue';
+      });
+    }
   },
   
-  pagination: { ...defaultPagination },
-  
-  filters: { ...defaultFilters },
-  
-  currentMoteur: {
-    data: null,
-    status: 'idle',
-    error: null,
-    timestamp: null
-  },
-  
-  // Actions pour récupérer les données
-  fetchMoteurs: async () => {
-    const { page, limit } = get().pagination;
-    const { search, etat, type, estMonte } = get().filters;
+  fetchMoteurById: async (id, forceRefresh = false) => {
+    const { cache } = get();
+    const now = Date.now();
+    
+    // Vérifier le cache d'abord
+    if (!forceRefresh && cache[id] && (now - cache[id].timestamp) < CACHE_DURATION) {
+      set((state) => {
+        state.activeMoteur = cache[id].data;
+      });
+      return cache[id].data;
+    }
     
     try {
-      set(state => ({
-        moteurs: { ...state.moteurs, status: 'loading', error: null }
-      }));
-      
-      const result: PaginatedResult<MoteurWithRelations> = await getMoteurs({
-        page,
-        limit,
-        etat,
-        type,
-        estMonte,
-        search: search || undefined
+      set((state) => {
+        state.isLoadingDetails = true;
+        state.error = null;
       });
       
-      set({
-        moteurs: {
-          data: result.data,
-          status: 'success',
-          error: null,
-          timestamp: Date.now()
-        },
-        pagination: {
-          ...get().pagination,
-          total: result.pagination.total,
-          totalPages: result.pagination.pageCount
-        }
+      const moteur = await getMoteurById(id);
+      
+      set((state) => {
+        state.activeMoteur = moteur;
+        state.isLoadingDetails = false;
+        // Mettre à jour le cache
+        state.cache[id] = { data: moteur, timestamp: now };
       });
+      
+      return moteur;
     } catch (error) {
-      set(state => ({
-        moteurs: {
-          ...state.moteurs,
-          status: 'error',
-          error: error instanceof Error ? error.message : 'Erreur lors du chargement des moteurs',
-        }
-      }));
+      set((state) => {
+        state.isLoadingDetails = false;
+        state.error = error instanceof Error ? error.message : 'Une erreur est survenue';
+        state.activeMoteur = null;
+      });
+      return null;
     }
   },
   
-  fetchMoteurById: async (id) => {
+  createNewMoteur: async (data) => {
     try {
-      set(state => ({
-        currentMoteur: { ...state.currentMoteur, status: 'loading', error: null }
-      }));
-      
-      const result = await getMoteurById(id);
-      
-      set({
-        currentMoteur: {
-          data: result as MoteurWithRelations,
-          status: 'success',
-          error: null,
-          timestamp: Date.now()
-        }
+      set((state) => {
+        state.isLoading = true;
+        state.error = null;
       });
-    } catch (error) {
-      set(state => ({
-        currentMoteur: {
-          ...state.currentMoteur,
-          status: 'error',
-          error: error instanceof Error ? error.message : 'Erreur lors du chargement du moteur',
-        }
-      }));
-    }
-  },
-  
-  changeEtat: async (id, nouvelEtat, notes) => {
-    try {
-      const result = await changeEtatMoteur(id, nouvelEtat, notes);
       
-      if (result.success) {
-        // Mettre à jour le moteur dans l'état
-        set(state => {
-          if (!state.moteurs.data) return state;
-          
-          const updatedMoteurs = state.moteurs.data.map(moteur => 
-            moteur.id === id 
-              ? { ...moteur, etat: nouvelEtat, notesEtat: notes || moteur.notesEtat } 
-              : moteur
-          );
-          
-          // Mettre à jour également le moteur courant si c'est celui qui a été modifié
-          const updatedCurrentMoteur = state.currentMoteur.data?.id === id
-            ? { ...state.currentMoteur.data, etat: nouvelEtat, notesEtat: notes || state.currentMoteur.data.notesEtat }
-            : state.currentMoteur.data;
-            
-          return {
-            moteurs: {
-              ...state.moteurs,
-              data: updatedMoteurs
-            },
-            currentMoteur: {
-              ...state.currentMoteur,
-              data: updatedCurrentMoteur
-            }
-          };
+      // Ensure required fields are present
+      if (!data.numSerie || !data.type) {
+        set((state) => {
+          state.isLoading = false;
+          state.error = "Le numéro de série et le type sont obligatoires";
+        });
+        return { success: false, error: "Le numéro de série et le type sont obligatoires" };
+      }
+      
+      // Create motor data with required fields guaranteed
+      const moteurData = {
+        numSerie: data.numSerie,
+        type: data.type,
+        dateAcquisition: data.dateAcquisition,
+        etat: data.etat,
+        notesEtat: data.notesEtat === null ? undefined : data.notesEtat,
+        cylindree: data.cylindree === null ? undefined : data.cylindree,
+        heuresMoteur: data.heuresMoteur === null ? undefined : data.heuresMoteur
+      };
+      
+      const result = await createMoteur(moteurData);
+      
+      if (result.success && result.data) {
+        set((state) => {
+          state.moteurs = [result.data!, ...state.moteurs];
+          state.isLoading = false;
         });
         
-        return true;
+        await get().fetchMoteurs(get().pagination.currentPage);
+        return result;
+      } else {
+        set((state) => {
+          state.isLoading = false;
+          state.error = result.error || "Échec de la création";
+        });
+        return result;
       }
-      
-      return false;
     } catch (error) {
-      console.error('Erreur lors du changement d\'état:', error);
-      return false;
+      set((state) => {
+        state.isLoading = false;
+        state.error = error instanceof Error ? error.message : 'Une erreur est survenue';
+      });
+      return { success: false, error: get().error };
     }
   },
   
-  monterMoteurSurCycle: async (moteurId, cycleId, technicien, notes) => {
+  updateExistingMoteur: async (id, data) => {
     try {
+      set((state) => {
+        state.isLoading = true;
+        state.error = null;
+      });
+      
+      // Get the current moteur to provide required fields if they're missing
+      const currentMoteur = get().activeMoteur || get().moteurs.find(m => m.id === id);
+      
+      // Create a clean version of data without null values
+      const cleanData = { ...data };
+      if (cleanData.notesEtat === null) cleanData.notesEtat = undefined;
+      if (cleanData.cylindree === null) cleanData.cylindree = undefined;
+      if (cleanData.heuresMoteur === null) cleanData.heuresMoteur = undefined;
+      
+      // Create update data object with required fields
+      const updateData = {
+        numSerie: cleanData.numSerie ?? currentMoteur?.numSerie ?? '',
+        type: cleanData.type ?? currentMoteur?.type ?? '',
+        dateAcquisition: cleanData.dateAcquisition,
+        etat: cleanData.etat,
+        notesEtat: cleanData.notesEtat,
+        cylindree: cleanData.cylindree,
+        heuresMoteur: cleanData.heuresMoteur
+      };
+      
+      const result = await updateMoteur(id, updateData);
+      
+      if (result.success && result.data) {
+        set((state) => {
+          state.moteurs = state.moteurs.map((moteur: MotoMoteur) => 
+            moteur.id === id ? { ...moteur, ...result.data } : moteur
+          );
+          
+          if (state.activeMoteur && state.activeMoteur.id === id) {
+            state.activeMoteur = { ...state.activeMoteur, ...result.data };
+          }
+          
+          // Mettre à jour le cache
+          state.cache[id] = { 
+            data: state.activeMoteur || result.data!, 
+            timestamp: Date.now() 
+          };
+          
+          state.isLoading = false;
+        });
+        return result;
+      } else {
+        set((state) => {
+          state.isLoading = false;
+          state.error = result.error || "Échec de la mise à jour";
+        });
+        return result;
+      }
+    } catch (error) {
+      set((state) => {
+        state.isLoading = false;
+        state.error = error instanceof Error ? error.message : 'Une erreur est survenue';
+      });
+      return { success: false, error: get().error };
+    }
+  },
+  
+  changeMoteurStatus: async (id, newStatus, notes) => {
+    try {
+      set((state) => {
+        state.isLoading = true;
+        state.error = null;
+      });
+      
+      const result = await changeEtatMoteur(id, newStatus, notes);
+      
+      if (result.success && result.data) {
+        set((state) => {
+          state.moteurs = state.moteurs.map((moteur: MotoMoteur) => 
+            moteur.id === id ? { ...moteur, etat: newStatus, notesEtat: notes || moteur.notesEtat } : moteur
+          );
+          
+          if (state.activeMoteur && state.activeMoteur.id === id) {
+            state.activeMoteur = { 
+              ...state.activeMoteur, 
+              etat: newStatus, 
+              notesEtat: notes || state.activeMoteur.notesEtat 
+            };
+          }
+          
+          // Mettre à jour le cache
+          if (state.cache[id]) {
+            state.cache[id] = { 
+              data: state.activeMoteur || {
+                ...state.cache[id].data,
+                etat: newStatus,
+                notesEtat: notes || state.cache[id].data.notesEtat
+              }, 
+              timestamp: Date.now() 
+            };
+          }
+          
+          state.isLoading = false;
+        });
+        return result;
+      } else {
+        set((state) => {
+          state.isLoading = false;
+          state.error = result.error || "Échec du changement d'état";
+        });
+        return result;
+      }
+    } catch (error) {
+      set((state) => {
+        state.isLoading = false;
+        state.error = error instanceof Error ? error.message : 'Une erreur est survenue';
+      });
+      return { success: false, error: get().error };
+    }
+  },
+  
+  monterMoteurSurCycle: async ({ moteurId, cycleId, technicien, notes }) => {
+    try {
+      set((state) => {
+        state.isMounting = true;
+        state.error = null;
+      });
+      
       const result = await monterMoteur({
-        moteurId,
-        cycleId,
-        technicien,
-        date: new Date(),
+        moteurId, 
+        cycleId, 
+        technicien, 
+        date: new Date(), 
         notes
       });
       
       if (result.success) {
-        // Refetch les données pour refléter le montage
-        get().fetchMoteurs();
-        get().fetchMoteurById(moteurId);
-        return true;
+        // Succès - nous devons rafraîchir les données
+        // car cette opération modifie plusieurs entités
+        await get().fetchMoteurs(get().pagination.currentPage, get().filters);
+        
+        // Si nous avons un moteur actif, rafraîchissons-le aussi
+        if (get().activeMoteur && get().activeMoteur?.id === moteurId) {
+          await get().fetchMoteurById(moteurId, true);
+        }
+        
+        set((state) => {
+          state.isMounting = false;
+        });
+        
+        return { success: true };
+      } else {
+        set((state) => {
+          state.isMounting = false;
+          state.error = result.error || "Échec du montage du moteur";
+        });
+        return { success: false, error: result.error };
       }
-      
-      return false;
     } catch (error) {
-      console.error('Erreur lors du montage du moteur:', error);
-      return false;
+      set((state) => {
+        state.isMounting = false;
+        state.error = error instanceof Error ? error.message : 'Une erreur est survenue';
+      });
+      return { success: false, error: get().error };
     }
   },
   
-  demonterMoteurDeCycle: async (cycleId, technicien, notes) => {
+  demonterMoteurDeCycle: async ({ cycleId, technicien, notes }) => {
     try {
+      set((state) => {
+        state.isMounting = true;
+        state.error = null;
+      });
+      
       const result = await demonterMoteur({
-        cycleId,
-        technicien,
-        date: new Date(),
+        cycleId, 
+        technicien, 
+        date: new Date(), 
         notes
       });
       
       if (result.success) {
-        // Refetch les données pour refléter le démontage
-        get().fetchMoteurs();
-        return true;
+        // Succès - nous devons rafraîchir les données
+        // car cette opération modifie plusieurs entités
+        await get().fetchMoteurs(get().pagination.currentPage, get().filters);
+        
+       // Si la relation existe via une autre propriété comme cycleId
+       if (get().activeMoteur && (get().activeMoteur as any).cycleActuel?.id === cycleId) {
+        const moteur = get().activeMoteur;
+        if (moteur) {
+          await get().fetchMoteurById(moteur.id, true);
+        }
       }
-      
-      return false;
+        
+        set((state) => {
+          state.isMounting = false;
+        });
+        
+        return { success: true };
+      } else {
+        set((state) => {
+          state.isMounting = false;
+          state.error = result.error || "Échec du démontage du moteur";
+        });
+        return { success: false, error: result.error };
+      }
     } catch (error) {
-      console.error('Erreur lors du démontage du moteur:', error);
-      return false;
+      set((state) => {
+        state.isMounting = false;
+        state.error = error instanceof Error ? error.message : 'Une erreur est survenue';
+      });
+      return { success: false, error: get().error };
     }
   },
   
-  // Gestion des filtres et pagination
-  setPage: (page) => set(state => ({
-    pagination: { ...state.pagination, page }
-  })),
-  
-  setLimit: (limit) => set(state => ({
-    pagination: { ...state.pagination, limit, page: 1 } // Retour à la page 1 lors du changement de limite
-  })),
-  
-  setFilters: (filters) => set(state => ({
-    filters: { ...state.filters, ...filters },
-    pagination: { ...state.pagination, page: 1 } // Retour à la page 1 lors du changement de filtres
-  })),
-  
-  resetFilters: () => set(state => ({
-    filters: { ...defaultFilters },
-    pagination: { ...state.pagination, page: 1 }
-  })),
-  
-  // Sélecteurs dérivés
-  getMoteursDisponibles: () => {
-    const { moteurs } = get();
-    if (!moteurs.data) return [];
-    return moteurs.data.filter(moteur => 
-      moteur.etat === 'DISPONIBLE' && moteur.cycleActuel === null
-    );
+  setFilters: (filters) => {
+    set((state) => {
+      state.filters = filters;
+    });
+    // Appliquer les filtres immédiatement
+    get().fetchMoteurs(1, filters);
   },
   
-  getMoteursMontes: () => {
-    const { moteurs } = get();
-    if (!moteurs.data) return [];
-    return moteurs.data.filter(moteur => moteur.cycleActuel !== null);
+  setPage: (page) => {
+    get().fetchMoteurs(page, get().filters);
+  },
+  
+  clearCache: () => {
+    set((state) => {
+      state.cache = {};
+    });
+  },
+  
+  invalidateCache: (id) => {
+    if (id) {
+      set((state) => {
+        delete state.cache[id];
+      });
+    } else {
+      get().clearCache();
+    }
   }
-});
+ }));
