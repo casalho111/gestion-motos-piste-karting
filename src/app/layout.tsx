@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { StoreProvider } from '@/components/providers/StoreProvider';
 import { Toaster } from '@/components/ui/sonner';
 import { ThemeProvider } from '@/components/providers/ThemeProvider';
 import { ThemeSync } from '@/components/providers/ThemeSync';
@@ -34,11 +33,9 @@ export default function RootLayout({
           defaultTheme="system"
           enableSystem
         >
-           <ThemeSync />
-          <StoreProvider>
-            {children}
-            <Toaster />
-          </StoreProvider>
+          <ThemeSync />
+          {children}
+          <Toaster />
         </ThemeProvider>
       </body>
     </html>

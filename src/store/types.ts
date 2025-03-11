@@ -5,6 +5,7 @@ import { TypePiece } from '@prisma/client';
 import { pieceSchema } from '@/lib/validations';
 import { TypeEntretien } from '@prisma/client';
 import { maintenanceSchema } from '@/lib/validations';
+import { Criticite } from '@prisma/client';
 
 
 export type Theme = 'light' | 'dark' | 'system';
@@ -171,3 +172,25 @@ export interface TimeRangeOption {
   };
 }
 
+// Types pour les alertes
+export type AlertType = 'maintenance' | 'stock' | 'technical' | 'info';
+
+export interface Alert {
+  id: string;
+  type: AlertType;
+  title: string;
+  message: string;
+  date: Date;
+  criticite: Criticite;
+  isRead: boolean;
+  entity?: {
+    id: string;
+    type: 'moto' | 'moteur' | 'piece';
+    name: string;
+  };
+  action?: {
+    label: string;
+    href?: string;
+    onClick?: () => void;
+  };
+}
